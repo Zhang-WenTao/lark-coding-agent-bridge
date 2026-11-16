@@ -96,6 +96,11 @@ export interface RestrictedChat {
    * run writes into files, so a script cannot carry the command past the guard.
    */
   deniedCommands: string[];
+  /**
+   * Entries of `access.guestDeniedCommands` lifted in this chat: a guest run
+   * here is not held to them (the chat's own `deniedCommands` still apply).
+   */
+  grantedCommands?: string[];
   /** Paths (`~` allowed) the run may neither read nor change. */
   deniedPaths?: string[];
   /**
@@ -570,12 +575,14 @@ function normalizeRestrictedChats(input: unknown): Record<string, RestrictedChat
     const deniedPaths = stringArray(raw.deniedPaths);
     const readOnlyPaths = stringArray(raw.readOnlyPaths);
     const deniedTools = stringArray(raw.deniedTools);
+    const grantedCommands = stringArray(raw.grantedCommands);
     const text = (v: unknown): string | undefined => (typeof v === 'string' && v.trim() ? v.trim() : undefined);
     const workspace = text(raw.workspace);
     const refusal = text(raw.refusal);
     const instruction = text(raw.instruction);
     out[chatId] = {
       deniedCommands: stringArray(raw.deniedCommands),
+      ...(grantedCommands.length > 0 ? { grantedCommands } : {}),
       ...(deniedPaths.length > 0 ? { deniedPaths } : {}),
       ...(readOnlyPaths.length > 0 ? { readOnlyPaths } : {}),
       ...(deniedTools.length > 0 ? { deniedTools } : {}),

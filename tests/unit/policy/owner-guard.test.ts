@@ -496,6 +496,15 @@ describe('restricted chats', () => {
     expect(run(guest, 'Bash', { command: 'kubectl get ns' }).stderr).toContain('这是一个危险操作，暂时不支持');
   });
 
+  it('lifts the guest denials a chat grants, keeping the rest and its own', () => {
+    const g = { ...guard, deniedCommands: ['device_command\\.py[\\s\\S]*--send', '\\bgit\\s+push\\b'] };
+    const lifted = restrictedChatGuard(g, { ...chat, grantedCommands: ['device_command\\.py[\\s\\S]*--send'] });
+    expect(lifted.deniedCommands).not.toContain('device_command\\.py[\\s\\S]*--send');
+    expect(lifted.deniedCommands).toContain('\\bgit\\s+push\\b');
+    expect(lifted.deniedCommands).toContain('net-debug');
+    expect(restrictedChatGuard(g, chat).deniedCommands).toContain('device_command\\.py[\\s\\S]*--send');
+  });
+
   it('honours a custom answer and tells the agent the same rules', () => {
     const custom = restrictedChatGuard(undefined, { ...chat, refusal: '暂不支持' }, { home: HOME, root: ROOT });
     expect(run(custom, 'Bash', { command: 'kubectl get ns' }).stderr).toContain('「暂不支持」');
