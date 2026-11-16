@@ -38,8 +38,13 @@ const WRITE_VERB =
   /^(?:sudo\s+)?(?:\w+=\S*\s+)*(?:cp|mv|rm|rmdir|ln|chmod|chown|touch|mkdir|install|truncate|rsync|unlink|tee|patch|git|dd)\b/;
 // Git subcommands that only read the repository, so read-only projects
 // (`access.guestReadOnlyRoots`) can still be browsed with git.
-const GIT_READ =
-  /^(?:sudo\s+)?(?:\w+=\S*\s+)*git\s+(?:(?:-C|-c)\s+\S+\s+|--no-pager\s+|--(?:git-dir|work-tree)=\S+\s+)*(?:log|show|diff|grep|blame|ls-files|ls-tree|cat-file|rev-parse|rev-list|describe|shortlog|merge-base|name-rev)\b/;
+const GIT_PREFIX =
+  /^(?:sudo\s+)?(?:\w+=\S*\s+)*git\s+(?:(?:-C|-c)\s+\S+\s+|--no-pager\s+|--(?:git-dir|work-tree)=\S+\s+)*/;
+const GIT_READ = new RegExp(
+  `${GIT_PREFIX.source}(?:log|show|diff|grep|blame|ls-files|ls-tree|cat-file|rev-parse|rev-list|describe|shortlog|merge-base|name-rev|status|count-objects|for-each-ref|show-ref|ls-remote|check-ignore|whatchanged|cherry|version)(?![\\w-])`,
+);
+// Subcommands that also have writing forms: only their listing forms read.
+const GIT_CALL = new RegExp(`${GIT_PREFIX.source}([\\w-]+)(.*)$`);
 const IN_PLACE = /\bsed\s+(?:-[a-zA-Z]*i|--in-place)|\bperl\s+-[a-zA-Z]*i/;
 const RELATIVE_REDIRECT = /(?:^|[^<>&\d])>{1,2}\s*(?!\/|&|\$|~)\S/;
 const BARE_CD = /(?:^|[;&|]\s*)cd\s*(?:$|[;&|])/;
@@ -126,8 +131,253 @@ function mentions(segment, rule) {
   }
 }
 
+const BRANCH_WRITE_LONG = new Set([
+  '--delete', '--move', '--copy', '--force', '--set-upstream-to', '--unset-upstream',
+  '--edit-description', '--track', '--no-track', '--create-reflog', '--recurse-submodules',
+]);
+const TAG_WRITE_LONG = new Set([
+  '--annotate', '--sign', '--local-user', '--force', '--delete', '--message', '--file', '--edit', '--create-reflog',
+]);
+const LISTING_FILTERS = new Set(['--contains', '--no-contains', '--merged', '--no-merged', '--points-at']);
+const LISTING_VALUES = new Set([...LISTING_FILTERS, '--sort', '--format', '--column', '--color']);
+
+/**
+ * `git branch` / `git tag` read only when they list: no writing flag, and no
+ * name unless a listing flag (`--list`, `--contains` …) makes it a pattern.
+ */
+function isRefListing(words, writeLong, writeShort) {
+  let listing = false;
+  let names = 0;
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i];
+    if (w.startsWith('--')) {
+      const name = w.split('=')[0];
+      if (writeLong.has(name)) return false;
+      if (name === '--list' || LISTING_FILTERS.has(name)) listing = true;
+      if (LISTING_VALUES.has(name) && !w.includes('=')) i++;
+    } else if (/^-[a-zA-Z]/.test(w)) {
+      if (writeShort.test(w.slice(1))) return false;
+      if (w.slice(1).includes('l')) listing = true;
+    } else {
+      names++;
+    }
+  }
+  return names === 0 || listing;
+}
+
+/** Read-only forms of git subcommands that can also write. */
+function isGitListing(sub, rest) {
+  const words = rest
+    .trim()
+    .split(/\s+/)
+    .filter((w) => w && !/^\d*[<>]/.test(w));
+  const plain = words.filter((w) => !w.startsWith('-'));
+  switch (sub) {
+    case 'remote':
+      return plain.length === 0 || ['get-url', 'show'].includes(plain[0]);
+    case 'stash':
+      return ['list', 'show'].includes(plain[0]);
+    case 'worktree':
+      return plain[0] === 'list';
+    case 'submodule':
+      return plain.length === 0 || plain[0] === 'status';
+    case 'reflog':
+      return !['expire', 'delete', 'drop'].includes(plain[0]);
+    case 'config': {
+      const writing = words.some((w) =>
+        /^(?:--(?:unset|unset-all|add|replace-all|edit|rename-section|remove-section)|-e)$/.test(w),
+      );
+      const reading =
+        ['get', 'list'].includes(plain[0]) ||
+        words.some((w) => /^(?:--(?:get|get-all|get-regexp|get-urlmatch|list)|-l)$/.test(w));
+      return reading && !writing && !['set', 'unset', 'rename-section', 'remove-section', 'edit'].includes(plain[0]);
+    }
+    case 'branch':
+      return isRefListing(words, BRANCH_WRITE_LONG, /[dDmMcCfut]/);
+    case 'tag':
+      return isRefListing(words, TAG_WRITE_LONG, /[asufdmFe]/);
+    default:
+      return false;
+  }
+}
+
+function isGitRead(trimmed) {
+  if (GIT_READ.test(trimmed)) return true;
+  const call = trimmed.match(GIT_CALL);
+  return Boolean(call) && isGitListing(call[1], call[2]);
+}
+
 function isWriteVerb(trimmed) {
-  return (WRITE_VERB.test(trimmed) && !GIT_READ.test(trimmed)) || IN_PLACE.test(trimmed);
+  return (WRITE_VERB.test(trimmed) && !isGitRead(trimmed)) || IN_PLACE.test(trimmed);
+}
+
+// What a search tool is looking for is text, not a place: `grep -n "a\|/Users"`
+// names no path, and its `|` must not split the command either. The pattern
+// word of grep-like tools is blanked before paths are looked for; a word that
+// runs a command (`$(…)`, backticks, `<(…)`) is never blanked.
+const SEARCH_TOOLS = {
+  grep: { short: 'efmABCdD', long: ['--regexp', '--file', '--max-count', '--after-context', '--before-context', '--context', '--directories', '--devices', '--label', '--binary-files'] },
+  rg: { short: 'efgtTmABCMjrEd', long: ['--regexp', '--file', '--glob', '--iglob', '--type', '--type-not', '--max-count', '--after-context', '--before-context', '--context', '--max-columns', '--threads', '--replace', '--encoding', '--max-depth', '--max-filesize', '--sort', '--sortr', '--color', '--colors', '--pre', '--pre-glob', '--type-add', '--path-separator', '--ignore-file'] },
+  ag: { short: 'GABCmgp', long: ['--ignore', '--ignore-dir', '--depth', '--file-search-regex', '--context', '--after', '--before', '--max-count', '--path-to-ignore', '--pager'] },
+  ack: { short: 'ABCm', long: ['--type', '--ignore-dir', '--ignore-file', '--match', '--output', '--max-count', '--context', '--after-context', '--before-context'] },
+  'git grep': { short: 'efABCm', long: ['--regexp', '--file', '--max-depth', '--threads', '--max-count', '--context', '--after-context', '--before-context'] },
+};
+const SEARCH_ALIASES = { egrep: 'grep', fgrep: 'grep', zgrep: 'grep', ggrep: 'grep' };
+const PATTERN_LONG = new Set(['--regexp', '--match']);
+const PATTERN_FILE_LONG = new Set(['--file']);
+const COMMAND_PREFIX = new Set(['sudo', 'command', 'nice', 'time', 'nohup', 'exec', 'then', 'do', 'else', 'elif', 'if', 'while', 'until', '!', '{']);
+const XARGS_VALUE = 'IinPLsdEJRS';
+
+/** Shell words of `cmd` with their spans, plus where each command starts. */
+function shellWords(cmd) {
+  const words = [];
+  let word = null;
+  let starts = true;
+  let redirect = false;
+  const end = (at) => {
+    if (word) {
+      word.end = at;
+      if (redirect) redirect = false;
+      else words.push(word);
+    }
+    word = null;
+  };
+  for (let i = 0; i < cmd.length; i++) {
+    const ch = cmd[i];
+    if (ch === "'" || ch === '"') {
+      word ??= { start: i, text: '', first: starts && ((starts = false), true) };
+      const close = ch === "'" ? cmd.indexOf("'", i + 1) : closingDoubleQuote(cmd, i + 1);
+      const stop = close === -1 ? cmd.length : close;
+      word.text += cmd.slice(i + 1, stop).replace(/\\(["\\$`])/g, ch === '"' ? '$1' : '\\$1');
+      word.raw = true;
+      i = stop;
+      continue;
+    }
+    if (ch === '\\' && i + 1 < cmd.length && cmd[i + 1] !== '\n') {
+      word ??= { start: i, text: '', first: starts && ((starts = false), true) };
+      word.text += cmd[i + 1];
+      i++;
+      continue;
+    }
+    if (/\s/.test(ch) || '|&;()<>'.includes(ch)) {
+      end(i);
+      if ((ch === '>' || ch === '<') && cmd[i + 1] !== '(') {
+        // `2>/dev/null`, `>&2`, `< in.txt`: the target is not an argument.
+        const last = words[words.length - 1];
+        if (last && last.end === i && /^\d+$/.test(last.text)) words.pop();
+        while (cmd[i + 1] === ch) i++;
+        if (cmd[i + 1] === '&') {
+          i++;
+          while (/[\d-]/.test(cmd[i + 1] ?? '')) i++;
+        } else {
+          redirect = true;
+        }
+        continue;
+      }
+      if (ch !== ' ' && ch !== '\t') starts = true;
+      continue;
+    }
+    word ??= { start: i, text: '', first: starts && ((starts = false), true) };
+    word.text += ch;
+  }
+  end(cmd.length);
+  return words;
+}
+
+function closingDoubleQuote(cmd, from) {
+  for (let i = from; i < cmd.length; i++) {
+    if (cmd[i] === '\\') i++;
+    else if (cmd[i] === '"') return i;
+  }
+  return -1;
+}
+
+/** The words of `cmd` that are the pattern of a search tool. */
+function searchPatterns(cmd) {
+  const words = shellWords(cmd);
+  const patterns = [];
+  for (let i = 0; i < words.length; i++) {
+    if (!words[i].first) continue;
+    let j = i;
+    // Commands are made of the words up to the next command start.
+    let stop = j + 1;
+    while (stop < words.length && !words[stop].first) stop++;
+    while (j < stop && (/^[A-Za-z_]\w*=/.test(words[j].text) || COMMAND_PREFIX.has(words[j].text))) j++;
+    if (words[j]?.text === 'xargs') {
+      j++;
+      while (j < stop && words[j].text.startsWith('-')) {
+        const w = words[j].text;
+        j += w.length === 2 && XARGS_VALUE.includes(w[1]) ? 2 : 1;
+      }
+    }
+    if (j >= stop) continue;
+    let tool = words[j].text.split('/').pop();
+    tool = SEARCH_ALIASES[tool] ?? tool;
+    if (tool === 'git') {
+      j++;
+      while (j < stop && /^(?:-C|-c)$/.test(words[j].text)) j += 2;
+      while (j < stop && /^--(?:no-pager|git-dir=|work-tree=)/.test(words[j].text)) j++;
+      if (words[j]?.text !== 'grep') continue;
+      tool = 'git grep';
+    }
+    const spec = SEARCH_TOOLS[tool];
+    if (!spec) continue;
+    patterns.push(...patternWords(words.slice(j + 1, stop), spec));
+  }
+  return patterns;
+}
+
+function patternWords(args, spec) {
+  const explicit = [];
+  let fromFile = false;
+  const positional = [];
+  let options = true;
+  for (let k = 0; k < args.length; k++) {
+    const w = args[k].text;
+    if (options && w === '--') {
+      options = false;
+    } else if (options && w.startsWith('--')) {
+      const [name] = w.split('=');
+      const inline = w.includes('=');
+      if (PATTERN_LONG.has(name)) {
+        if (inline) explicit.push(args[k]);
+        else if (args[k + 1]) explicit.push(args[++k]);
+      } else if (PATTERN_FILE_LONG.has(name)) {
+        fromFile = true;
+        if (!inline) k++;
+      } else if (spec.long.includes(name) && !inline) {
+        k++;
+      }
+    } else if (options && /^-[^-]/.test(w)) {
+      for (let c = 1; c < w.length; c++) {
+        if (!spec.short.includes(w[c])) continue;
+        const attached = c + 1 < w.length;
+        if (w[c] === 'e') {
+          if (attached) explicit.push(args[k]);
+          else if (args[k + 1]) explicit.push(args[++k]);
+        } else {
+          if (w[c] === 'f') fromFile = true;
+          if (!attached) k++;
+        }
+        break;
+      }
+    } else {
+      positional.push(args[k]);
+    }
+  }
+  const found = explicit.length > 0 || fromFile ? explicit : positional.slice(0, 1);
+  return found;
+}
+
+/** `cmd` with the patterns of search tools blanked out (same length). */
+function blankSearchPatterns(cmd) {
+  let out = cmd;
+  for (const w of searchPatterns(cmd)) {
+    const raw = cmd.slice(w.start, w.end);
+    if (/\$\(|`|<\(/.test(raw)) continue;
+    out = out.slice(0, w.start) + raw.replace(/[^\n]/g, ' ') + out.slice(w.end);
+  }
+  return out;
 }
 
 function writesInto(segment, rule) {
@@ -157,7 +407,7 @@ function decideBash(command, cfg, cwd) {
   for (const re of cfg.deniedCommands ?? []) {
     if (new RegExp(re).test(full)) return '这条命令属于仅限主人的操作';
   }
-  const cmd = stripDataHeredocs(full);
+  const cmd = blankSearchPatterns(stripDataHeredocs(full));
   let cdInto = null;
   for (const segment of cmd.split(/&&|\|\||;|\||\n/)) {
     const trimmed = segment.trim();

@@ -105,6 +105,8 @@ export function ownerOnlyGuard(opts: {
   deniedCommands?: readonly string[];
   /** The run's working directory. */
   workspace?: string;
+  /** The chat the run serves: its own knowledge notes stay readable. */
+  chatId?: string;
   home?: string;
   root?: string;
 }): RunGuard {
@@ -114,6 +116,12 @@ export function ownerOnlyGuard(opts: {
   const claude = join(home, '.claude');
   const expand = (p: string): string => (p === '~' ? home : p.startsWith('~/') ? join(home, p.slice(2)) : p);
   const readOnlyRoots = (opts.guestReadOnlyRoots ?? []).map(expand);
+  const media = `${escapeRe(lc)}/profiles/[^/]+/media/`;
+  // The knowledge notes the bridge points every chat at: the shared layers and
+  // this chat's own (topics included). The owner's layer and other chats' stay closed.
+  const notes = `${escapeRe(lc)}/profiles/[^/]+/knowledge/notes/(?:global|global-external|external${
+    opts.chatId ? `|${escapeRe(opts.chatId)}(?:_[^/\\s'"\`;|&()<>]+)?` : ''
+  })/`;
   return {
     home,
     allowedRoots: [
@@ -128,19 +136,21 @@ export function ownerOnlyGuard(opts: {
       ...skillTargets(join(claude, 'skills')),
       join(home, '.local', 'bin'),
     ],
-    allowPatterns: [`${escapeRe(lc)}/profiles/[^/]+/media/`],
+    allowPatterns: [media, notes],
     rules: [
       // A read-only root inside these trees (say one skill of a synced skill
       // library) stays readable and runnable.
       carveReadOnly({ path: root, bash: 'any' }, readOnlyRoots),
       // Attachments the user sent land under media/ and must stay readable.
-      carveReadOnly({ path: lc, bash: 'any', allow: [`${escapeRe(lc)}/profiles/[^/]+/media/`] }, readOnlyRoots),
+      carveReadOnly({ path: lc, bash: 'any', allow: [media, notes] }, readOnlyRoots),
       ...['CLAUDE.md', 'settings.json', 'settings.local.json', 'skills', 'agents', 'scripts', 'projects'].map(
         (name): GuardRule => ({ path: join(claude, name), bash: 'write' }),
       ),
       { path: join(home, '.local', 'bin'), bash: 'write' },
       { path: join(home, 'Library', 'LaunchAgents'), bash: 'write' },
       ...readOnlyRoots.map((path): GuardRule => ({ path, bash: 'write' })),
+      // Readable through the allow above, never writable.
+      ...profileDirs(lc).map((dir): GuardRule => ({ path: join(dir, 'knowledge'), bash: 'write' })),
     ],
     readDeny: [
       join(lc, 'config.json*'),
@@ -225,6 +235,15 @@ export function restrictedChatInstruction(chat: RestrictedChat): string {
     '也不要凭已知的上下文说出上面这些内容。' +
     `遇到这类请求，或者某一步被拦截时，只回复「${refusal}」这一句：不解释原因，不提这条规则的存在，也不要换个写法再试。`
   );
+}
+
+/** Each profile directory of the bridge home. */
+function profileDirs(lc: string): string[] {
+  try {
+    return readdirSync(join(lc, 'profiles')).map((name) => join(lc, 'profiles', name));
+  } catch {
+    return [];
+  }
 }
 
 /** Where symlinked skills really live, so running their scripts stays possible. */

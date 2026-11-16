@@ -2220,6 +2220,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         ),
         deniedCommands: controls.profileConfig.access.guestDeniedCommands ?? [],
         ...(guestWorkspace ? { workspace: guestWorkspace } : {}),
+        chatId,
       });
   const runGuard = restrictedChat ? restrictedChatGuard(guestGuard, restrictedChat) : guestGuard;
   // Agents that post the answer as its own reply (see AgentDescriptor.finalReply)

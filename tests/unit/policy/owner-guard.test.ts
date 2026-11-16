@@ -1,4 +1,6 @@
 import { spawnSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { NormalizedMessage } from '@larksuite/channel';
 import { describe, expect, it } from 'vitest';
@@ -141,6 +143,24 @@ describe('guest runs: file scope', () => {
     expect(bash(command).code).toBe(2);
   });
 
+  it('reads what a search tool looks for as text, not a place', () => {
+    expect(bash('sed -n 1,60p notes.md | grep -n -i "IdeaProjects\\|路径\\|/Users" | head -30').code).toBe(0);
+    expect(bash('grep -rn "/Users/someone/Documents" /tmp/repo').code).toBe(0);
+    expect(bash("rg -n 'a|/Users' ./src 2>/dev/null").code).toBe(0);
+    expect(bash('grep -e /Users -e ~/.ssh -rn /tmp/repo').code).toBe(0);
+    expect(bash(`git -C ${OPEN}/antelope grep -n "/Users/someone" -- src`).code).toBe(0);
+    expect(bash('xargs -0 grep -l "/Users" < files.txt').code).toBe(0);
+  });
+
+  it.each([
+    ['a search over a private place', 'grep -rn foo /Users'],
+    ['a pattern file in a private place', 'grep -f ~/Documents/p.txt -r /tmp/repo'],
+    ['a pattern that runs a command', 'grep -n "$(cat ~/Documents/notes.txt)" /tmp/x'],
+    ['the files after an explicit pattern', 'grep -e foo ~/Documents/notes.txt'],
+  ])('still checks %s', (_label, command) => {
+    expect(bash(command).code).toBe(2);
+  });
+
   it('applies the same scope to file tools', () => {
     expect(hook('Read', { file_path: `${HOME}/Desktop/coding/lark/thing-hub/CLAUDE.md` }).code).toBe(2);
     expect(hook('Grep', { pattern: 'x', path: `${HOME}/Desktop` }).code).toBe(2);
@@ -163,6 +183,12 @@ describe('guest runs: read-only roots', () => {
     ['searching', `grep -rn Dispatch ${READ_ONLY}/logic | head -20`],
     ['git history', `git -C ${READ_ONLY} log -5 --oneline`],
     ['read-only git inside the project', `cd ${READ_ONLY} && git show HEAD --stat && git blame logic/a.c`],
+    ['git status and size', `git -C ${READ_ONLY} status -sb && git -C ${READ_ONLY} count-objects -vH`],
+    ['listing remotes', `git -C ${READ_ONLY} remote -v && git -C ${READ_ONLY} remote get-url origin`],
+    ['listing branches and tags', `git -C ${READ_ONLY} branch -a --sort=-committerdate && git -C ${READ_ONLY} tag -l "v1*"`],
+    ['branches holding a commit', `git -C ${READ_ONLY} branch -r --contains abc123`],
+    ['the current branch', `cd ${READ_ONLY} && git branch --show-current && git stash list`],
+    ['reading config', `git -C ${READ_ONLY} config --get remote.origin.url`],
   ])('allows %s', (_label, command) => {
     expect(bash(command).code).toBe(0);
   });
@@ -174,6 +200,14 @@ describe('guest runs: read-only roots', () => {
     ['switching branches inside it', `cd ${READ_ONLY} && git checkout -b x`],
     ['cd then write', `cd ${READ_ONLY} && echo x > a.txt`],
     ['an in-place edit', `sed -i '' s/a/b/ ${READ_ONLY}/a.c`],
+    ['creating a branch', `git -C ${READ_ONLY} branch feature/x`],
+    ['deleting a branch', `git -C ${READ_ONLY} branch -D feature/x`],
+    ['setting an upstream', `git -C ${READ_ONLY} branch --set-upstream-to=origin/dev`],
+    ['adding a remote', `git -C ${READ_ONLY} remote add fork git@x:y.git`],
+    ['changing a remote', `git -C ${READ_ONLY} remote set-url origin git@x:y.git`],
+    ['tagging', `git -C ${READ_ONLY} tag v9.9.9`],
+    ['stashing', `cd ${READ_ONLY} && git stash`],
+    ['writing config', `git -C ${READ_ONLY} config user.name x`],
   ])('refuses %s', (_label, command) => {
     const res = bash(command);
     expect(res.code).toBe(2);
@@ -226,6 +260,42 @@ describe('guest runs: read-only roots', () => {
       expect(run('Bash', { command: `cat ${SKILL}/../../../../../../config.json` })).toBe(2);
       expect(run('Bash', { command: 'cat ~/.lark-channel/config.json' })).toBe(2);
     });
+  });
+});
+
+describe('guest runs: knowledge notes', () => {
+  const home = mkdtempSync(join(tmpdir(), 'guard-home-'));
+  const lc = join(home, '.lark-channel');
+  const notes = join(lc, 'profiles', 'claude', 'knowledge', 'notes');
+  mkdirSync(notes, { recursive: true });
+  const g = ownerOnlyGuard({ larkChannelHome: lc, home, root: ROOT, chatId: 'oc_vip', workspace: join(home, 'ws') });
+  const run = (toolName: string, toolInput: Record<string, unknown>) =>
+    spawnSync(process.execPath, [g.hookScript], {
+      input: JSON.stringify({ tool_name: toolName, tool_input: toolInput, cwd: join(home, 'ws') }),
+      env: { ...process.env, ...claudeGuardArgs(g).env },
+      encoding: 'utf8',
+    }).status;
+
+  it('reads the shared layers and the chat\'s own notes, topics included', () => {
+    expect(run('Bash', { command: `cat ${notes}/global/antelope-ev-charger.md` })).toBe(0);
+    expect(run('Bash', { command: `cat ${notes}/global-external/tdengine.md ${notes}/external/x/y.md` })).toBe(0);
+    expect(run('Read', { file_path: `${notes}/oc_vip/a.md` })).toBe(0);
+    expect(run('Bash', { command: `cat ${notes}/oc_vip_omt_123/cloud61-portal-login.md; ls ${home}/ws` })).toBe(0);
+  });
+
+  it('keeps the owner\'s layer, other chats and the rest of the bridge home closed', () => {
+    expect(run('Read', { file_path: `${notes}/global-owner/team-roster.md` })).toBe(2);
+    expect(run('Bash', { command: `cat ${notes}/oc_owner_p2p/a.md` })).toBe(2);
+    expect(run('Bash', { command: `cat ${notes}/oc_vipx/a.md` })).toBe(2);
+    expect(run('Bash', { command: `cat ${notes}/global/../global-owner/a.md` })).toBe(2);
+    expect(run('Bash', { command: `ls ${notes}` })).toBe(2);
+    expect(run('Read', { file_path: `${lc}/config.json` })).toBe(2);
+  });
+
+  it('never lets them be written', () => {
+    expect(run('Bash', { command: `echo x > ${notes}/global/a.md` })).toBe(2);
+    expect(run('Bash', { command: `rm ${notes}/oc_vip/a.md` })).toBe(2);
+    expect(run('Write', { file_path: `${notes}/oc_vip/a.md`, content: 'x' })).toBe(2);
   });
 });
 
