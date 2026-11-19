@@ -56,7 +56,7 @@ describe('Claude account failover (process)', () => {
     await chmod(binary, 0o755);
 
     const paths = claudeAccountsPaths(dir);
-    await writeFile(paths.configFile, JSON.stringify({ accounts: [{ id: 'default' }, { id: 'b', label: 'backup' }] }));
+    await writeFile(paths.configFile, JSON.stringify({ accounts: [{ id: 'default', label: 'cli' }, { id: 'b', label: 'backup' }] }));
     const pool = new ClaudeAccountPool({ paths, readSecret: async () => 'sk-ant-oat01-b' });
     const adapter = new ClaudeAdapter({ binary, accounts: pool, probeQuota: false });
     await adapter.prepareRun();
