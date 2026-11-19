@@ -1,6 +1,6 @@
 import pkg from '../../package.json';
 import { startChannel as realStartChannel, type BridgeChannel } from '../bot/channel';
-import type { Controls } from '../commands';
+import type { Controls } from '../commands/types';
 import type { AppPaths } from '../config/app-paths';
 import { isComplete, type AppConfig } from '../config/schema';
 import type { AgentKind, ProfileConfig } from '../config/profile-schema';

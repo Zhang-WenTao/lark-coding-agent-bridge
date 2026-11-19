@@ -2,7 +2,7 @@ import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import type { CodexConfig } from '../../config/profile-schema';
 import { mergeProcessEnv, spawnProcess } from '../../platform/spawn';
-import type { QuotaReading, QuotaReadOptions, QuotaWindow } from '../quota';
+import type { QuotaReading, QuotaReadOptions, QuotaWindow } from '../quota-window';
 
 /**
  * Codex's rate-limit windows through `codex app-server`: `initialize` →

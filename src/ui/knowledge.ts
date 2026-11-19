@@ -1,4 +1,4 @@
-import type { Controls } from '../commands';
+import type { Controls } from '../commands/types';
 import {
   profileAppPaths,
   saveKnowledgeConfig,

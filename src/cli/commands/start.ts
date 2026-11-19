@@ -11,7 +11,7 @@ import {
 } from '../../agent/preflight';
 import type { AgentAdapter } from '../../agent/types';
 import { startChannel, type BridgeChannel } from '../../bot/channel';
-import type { Controls } from '../../commands';
+import type { Controls } from '../../commands/types';
 import type { AppPaths } from '../../config/app-paths';
 import {
   type AgentKind,

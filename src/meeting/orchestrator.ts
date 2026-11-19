@@ -1,7 +1,7 @@
 import type { LarkChannel } from '@larksuite/channel';
 import type { AgentEvent } from '../agent/types';
 import { agentCapability } from '../agent/capability';
-import type { Controls } from '../commands';
+import type { Controls } from '../commands/types';
 import { log } from '../core/logger';
 import type { RunExecutor } from '../runtime/run-executor';
 import type { ActiveRuns } from '../bot/active-runs';

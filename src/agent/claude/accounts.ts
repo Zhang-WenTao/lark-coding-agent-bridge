@@ -5,7 +5,7 @@ import { log } from '../../core/logger';
 import { writeFileAtomic } from '../../platform/atomic-write';
 import { withFileLock } from '../../platform/file-lock';
 import type { AgentEvent } from '../types';
-import type { QuotaReading, QuotaWindow } from '../quota';
+import type { QuotaReading, QuotaWindow } from '../quota-window';
 import { isOffDay, refreshHolidays } from './off-days';
 
 /**

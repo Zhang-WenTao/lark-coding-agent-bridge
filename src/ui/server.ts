@@ -36,7 +36,7 @@ import {
   sendHtml,
   sendJson,
 } from './http';
-import type { Controls } from '../commands';
+import type { Controls } from '../commands/types';
 import type { UiServerDeps, UiServerHandle } from './types';
 
 const DEFAULT_HOST = '127.0.0.1';

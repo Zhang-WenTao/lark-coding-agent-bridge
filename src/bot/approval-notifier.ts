@@ -1,6 +1,6 @@
 import type { LarkChannel } from '@larksuite/channel';
 import { approverCard, requesterCard, settledCard, type ApprovalCardContext } from '../card/approval-cards';
-import type { Controls } from '../commands';
+import type { Controls } from '../commands/types';
 import { log } from '../core/logger';
 import type { ApprovalNotifier, ApprovalOutcome, PendingApproval } from '../runtime/approvals';
 

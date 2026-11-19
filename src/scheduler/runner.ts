@@ -12,7 +12,7 @@ import { promptSection } from '../agent/prompt';
 import { buildKnowledgeContext, nativeSkillOption } from '../knowledge/inject';
 import { isCreator } from '../policy/access';
 import { findRelevantNotes } from '../knowledge/relevance';
-import type { Controls } from '../commands';
+import type { Controls } from '../commands/types';
 import { effortPrefForChat, getMessageReplyMode, getRunIdleTimeoutMs, getShowToolCalls } from '../config/schema';
 import { log } from '../core/logger';
 import { canUseDm, canUseGroup } from '../policy/access';

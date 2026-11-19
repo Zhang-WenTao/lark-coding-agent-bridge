@@ -1,5 +1,5 @@
 import { runCapture } from '../../git/exec';
-import { quotaResetAt, type QuotaReading, type QuotaReadOptions, type QuotaWindow } from '../quota';
+import { quotaResetAt, type QuotaReading, type QuotaReadOptions, type QuotaWindow } from '../quota-window';
 import { claudeAccountPool, FABLE_WINDOW, WINDOW_KINDS, WINDOW_LABELS, type ClaudeAccountPool, type WindowKind } from './accounts';
 
 /**
