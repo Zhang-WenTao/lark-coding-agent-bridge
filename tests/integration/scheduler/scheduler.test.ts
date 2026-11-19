@@ -306,9 +306,12 @@ describe('scheduler concurrency', () => {
     return { started, release, runJob };
   }
 
+  // The store lists jobs oldest first; equal createdAt would leave the order
+  // to the random ids.
+  let created = 0;
   function dueAt(prompt: string, nextRunAt: number): ScheduledJob {
-    const created = store.add(job({ prompt }));
-    return store.update(created.id, { nextRunAt })!;
+    const added = store.add(job({ prompt, createdAt: ++created }));
+    return store.update(added.id, { nextRunAt })!;
   }
 
   const settle = (): Promise<void> => new Promise((r) => setTimeout(r, 20));
