@@ -114,6 +114,42 @@ describe('Claude account list', () => {
     expect(await getSecret(accountSecretId('b'), paths.keystore)).toBeUndefined();
     expect(readAccountsConfig(paths).accounts.map((a) => a.id)).toEqual(['default']);
   });
+
+  it('refuses to change a broken accounts file instead of writing the default over it', async () => {
+    const dir = await tmp();
+    const paths = claudeAccountsPaths(dir);
+    const broken = '{"accounts":[{"id":"default"},{"id":"b","label":"Bee"}';
+    await writeFile(paths.configFile, broken);
+
+    await expect(updateAccount(paths, 'b', { label: 'Bea' })).rejects.toThrow(/读不懂/);
+    await expect(saveAccount(paths, { id: 'c', token: 'sk-ant-oat01-c' })).rejects.toThrow(/读不懂/);
+    await expect(switchToAccount(paths, 'b')).rejects.toThrow(/读不懂/);
+    await expect(updateDefaultLines(paths, { five_hour: 90 })).rejects.toThrow(/读不懂/);
+    expect(await readFile(paths.configFile, 'utf8')).toBe(broken);
+  });
+
+  it('starts a missing accounts file from the default', async () => {
+    const dir = await tmp();
+    const paths = claudeAccountsPaths(dir);
+    await saveAccount(paths, { id: 'b', token: 'sk-ant-oat01-b' });
+    expect(readAccountsConfig(paths).accounts.map((a) => a.id)).toEqual(['default', 'b']);
+  });
+
+  it('keeps both of two changes made at once', async () => {
+    const dir = await tmp();
+    const paths = claudeAccountsPaths(dir);
+    await saveAccount(paths, { id: 'b', token: 'sk-ant-oat01-b' });
+    await saveAccount(paths, { id: 'c', token: 'sk-ant-oat01-c' });
+    await Promise.all([
+      updateAccount(paths, 'b', { label: 'Bee' }),
+      updateAccount(paths, 'c', { label: 'Cee' }),
+      updateDefaultLines(paths, { five_hour: 90 }),
+    ]);
+    const config = readAccountsConfig(paths);
+    expect(config.accounts.find((a) => a.id === 'b')?.label).toBe('Bee');
+    expect(config.accounts.find((a) => a.id === 'c')?.label).toBe('Cee');
+    expect(config.lines.five_hour).toBe(90);
+  });
 });
 
 describe('ClaudeAccountPool', () => {

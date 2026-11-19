@@ -182,23 +182,25 @@ export async function saveAccountConfig(
   const appPaths = profileAppPaths(state);
   await setSecret(secretKeyForApp(newCfg.accounts.app.id), plaintextSecret, appPaths);
 
-  const root = await loadRootConfig(state.configPath);
-  if (!root) {
-    await saveConfig(newCfg, state.configPath);
-    state.cfg = newCfg;
-    return;
-  }
+  await withConfigFileLock(state.configPath, async () => {
+    const root = await loadRootConfig(state.configPath);
+    if (!root) {
+      await saveConfig(newCfg, state.configPath);
+      state.cfg = newCfg;
+      return;
+    }
 
-  const profile = root.profiles[state.profile];
-  if (!profile) throw new Error(`profile not found: ${state.profile}`);
-  root.profiles[state.profile] = {
-    ...profile,
-    accounts: newCfg.accounts,
-  };
-  if (newCfg.secrets) root.secrets = newCfg.secrets;
-  await saveRootConfig(root, state.configPath);
-  state.profileConfig = root.profiles[state.profile]!;
-  state.cfg = runtimeProfileConfig(root, state.profile);
+    const profile = root.profiles[state.profile];
+    if (!profile) throw new Error(`profile not found: ${state.profile}`);
+    root.profiles[state.profile] = {
+      ...profile,
+      accounts: newCfg.accounts,
+    };
+    if (newCfg.secrets) root.secrets = newCfg.secrets;
+    await saveRootConfig(root, state.configPath);
+    state.profileConfig = root.profiles[state.profile]!;
+    state.cfg = runtimeProfileConfig(root, state.profile);
+  });
 }
 
 /**

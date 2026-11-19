@@ -3,6 +3,7 @@ import { dirname, join, resolve } from 'node:path';
 import { getSecret, removeSecret, setSecret, type KeystorePaths } from '../../config/keystore';
 import { log } from '../../core/logger';
 import { writeFileAtomic } from '../../platform/atomic-write';
+import { withFileLock } from '../../platform/file-lock';
 import type { AgentEvent } from '../types';
 import type { QuotaReading, QuotaWindow } from '../quota';
 import { isOffDay, refreshHolidays } from './off-days';
@@ -348,6 +349,45 @@ async function writeAccountsConfig(paths: ClaudeAccountsPaths, config: ClaudeAcc
   await writeFileAtomic(paths.configFile, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
 }
 
+/**
+ * The file as it stands, for a change to it. Unlike {@link readAccountsConfig}
+ * it never falls back to the default when the file is there but unreadable
+ * or broken: writing that back would wipe every account. Only a missing file
+ * starts from the default.
+ */
+function readAccountsConfigForWrite(paths: ClaudeAccountsPaths): ClaudeAccountsConfig {
+  let text: string;
+  try {
+    text = readFileSync(paths.configFile, 'utf8');
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return defaultAccountsConfig();
+    throw err;
+  }
+  try {
+    JSON.parse(text);
+  } catch (err) {
+    throw new Error(`账户配置 ${paths.configFile} 读不懂，没有改动它：${(err as Error).message}`);
+  }
+  return parseAccountsConfig(text);
+}
+
+/**
+ * Read, change and write the accounts file under a lock shared with every
+ * other process, so the daemon's own switches and `/account` commands cannot
+ * undo each other. `change` returning `false` leaves the file as it was.
+ */
+async function mutateAccountsConfig<T = ClaudeAccountsConfig>(
+  paths: ClaudeAccountsPaths,
+  change: (config: ClaudeAccountsConfig) => Promise<T | false> | T | false,
+): Promise<{ config: ClaudeAccountsConfig; result: T | false }> {
+  return withFileLock(paths.configFile, async () => {
+    const config = readAccountsConfigForWrite(paths);
+    const result = await change(config);
+    if (result !== false) await writeAccountsConfig(paths, config);
+    return { config, result };
+  });
+}
+
 export interface AccountChanges {
   label?: string;
   /** Per window; `0` drops the account's own line (back to the profile's). */
@@ -365,11 +405,11 @@ export async function saveAccount(
 ): Promise<ClaudeAccountsConfig> {
   if (account.id === DEFAULT_ACCOUNT_ID) throw new Error('default 是 CLI 自己的登录，不能存令牌');
   if (!isValidAccountId(account.id)) throw new Error(`账号 id 只能用字母、数字、- 和 _（最长 32 位）：${account.id}`);
-  const config = readAccountsConfig(paths);
-  if (!config.accounts.some((a) => a.id === account.id)) config.accounts.push({ id: account.id });
-  applyAccountChanges(config, account.id, account);
-  await setSecret(accountSecretId(account.id), account.token, paths.keystore);
-  await writeAccountsConfig(paths, config);
+  const { config } = await mutateAccountsConfig(paths, async (config) => {
+    if (!config.accounts.some((a) => a.id === account.id)) config.accounts.push({ id: account.id });
+    applyAccountChanges(config, account.id, account);
+    await setSecret(accountSecretId(account.id), account.token, paths.keystore);
+  });
   return config;
 }
 
@@ -379,10 +419,10 @@ export async function updateAccount(
   id: string,
   changes: AccountChanges,
 ): Promise<ClaudeAccountsConfig> {
-  const config = readAccountsConfig(paths);
-  if (!config.accounts.some((a) => a.id === id)) throw new Error(`没有账户 ${id}`);
-  applyAccountChanges(config, id, changes);
-  await writeAccountsConfig(paths, config);
+  const { config } = await mutateAccountsConfig(paths, (config) => {
+    if (!config.accounts.some((a) => a.id === id)) throw new Error(`没有账户 ${id}`);
+    applyAccountChanges(config, id, changes);
+  });
   return config;
 }
 
@@ -391,14 +431,14 @@ export async function updateDefaultLines(
   paths: ClaudeAccountsPaths,
   lines: Partial<SwitchLines>,
 ): Promise<ClaudeAccountsConfig> {
-  const config = readAccountsConfig(paths);
-  for (const kind of WINDOW_KINDS) {
-    const value = lines[kind];
-    if (value === undefined) continue;
-    if (!isValidLine(value)) throw new Error(`切换线要在 1–100 之间：${value}`);
-    config.lines[kind] = value;
-  }
-  await writeAccountsConfig(paths, config);
+  const { config } = await mutateAccountsConfig(paths, (config) => {
+    for (const kind of WINDOW_KINDS) {
+      const value = lines[kind];
+      if (value === undefined) continue;
+      if (!isValidLine(value)) throw new Error(`切换线要在 1–100 之间：${value}`);
+      config.lines[kind] = value;
+    }
+  });
   return config;
 }
 
@@ -408,52 +448,52 @@ export async function updateOffDayLines(
   lines: Partial<Record<WindowKind, number>>,
   graceHours: Partial<Record<WindowKind, number>> = {},
 ): Promise<ClaudeAccountsConfig> {
-  const config = readAccountsConfig(paths);
-  const grace: Partial<Record<WindowKind, number>> = { ...config.offDayGraceHours };
-  for (const kind of WINDOW_KINDS) {
-    const value = graceHours[kind];
-    if (value === undefined) continue;
-    if (value === 0) delete grace[kind];
-    else if (!isValidGraceHours(value)) throw new Error(`临近重置时长要在 0–168 小时之间：${value}`);
-    else grace[kind] = value;
-  }
-  if (Object.keys(grace).length > 0) config.offDayGraceHours = grace;
-  else delete config.offDayGraceHours;
-  const next: Partial<SwitchLines> = { ...config.offDayLines };
-  for (const kind of WINDOW_KINDS) {
-    const value = lines[kind];
-    if (value === undefined) continue;
-    if (value === 0) delete next[kind];
-    else if (!isValidLine(value)) throw new Error(`切换线要在 1–100 之间：${value}`);
-    else next[kind] = value;
-  }
-  if (Object.keys(next).length > 0) config.offDayLines = next;
-  else delete config.offDayLines;
-  await writeAccountsConfig(paths, config);
+  const { config } = await mutateAccountsConfig(paths, (config) => {
+    const grace: Partial<Record<WindowKind, number>> = { ...config.offDayGraceHours };
+    for (const kind of WINDOW_KINDS) {
+      const value = graceHours[kind];
+      if (value === undefined) continue;
+      if (value === 0) delete grace[kind];
+      else if (!isValidGraceHours(value)) throw new Error(`临近重置时长要在 0–168 小时之间：${value}`);
+      else grace[kind] = value;
+    }
+    if (Object.keys(grace).length > 0) config.offDayGraceHours = grace;
+    else delete config.offDayGraceHours;
+    const next: Partial<SwitchLines> = { ...config.offDayLines };
+    for (const kind of WINDOW_KINDS) {
+      const value = lines[kind];
+      if (value === undefined) continue;
+      if (value === 0) delete next[kind];
+      else if (!isValidLine(value)) throw new Error(`切换线要在 1–100 之间：${value}`);
+      else next[kind] = value;
+    }
+    if (Object.keys(next).length > 0) config.offDayLines = next;
+    else delete config.offDayLines;
+  });
   return config;
 }
 
 /** Put the named accounts first, in the order given; the rest keep their order after them. */
 /** Turn the 5-hour window stagger on or off for the profile. */
 export async function updateStagger(paths: ClaudeAccountsPaths, enabled: boolean): Promise<ClaudeAccountsConfig> {
-  const config = readAccountsConfig(paths);
-  if (enabled) delete config.stagger;
-  else config.stagger = false;
-  await writeAccountsConfig(paths, config);
+  const { config } = await mutateAccountsConfig(paths, (config) => {
+    if (enabled) delete config.stagger;
+    else config.stagger = false;
+  });
   return config;
 }
 
 export async function reorderAccounts(paths: ClaudeAccountsPaths, ids: string[]): Promise<ClaudeAccountsConfig> {
-  const config = readAccountsConfig(paths);
-  const known = new Set(config.accounts.map((a) => a.id));
-  const unknown = ids.filter((id) => !known.has(id));
-  if (unknown.length > 0) throw new Error(`没有账户：${unknown.join(', ')}`);
-  if (new Set(ids).size !== ids.length) throw new Error('账户重复了');
-  const first = ids.map((id) => config.accounts.find((a) => a.id === id)!);
-  config.accounts = [...first, ...config.accounts.filter((a) => !ids.includes(a.id))];
-  // Raised lines belong to the main account alone.
-  for (const entry of config.accounts.slice(1)) delete entry.boost;
-  await writeAccountsConfig(paths, config);
+  const { config } = await mutateAccountsConfig(paths, (config) => {
+    const known = new Set(config.accounts.map((a) => a.id));
+    const unknown = ids.filter((id) => !known.has(id));
+    if (unknown.length > 0) throw new Error(`没有账户：${unknown.join(', ')}`);
+    if (new Set(ids).size !== ids.length) throw new Error('账户重复了');
+    const first = ids.map((id) => config.accounts.find((a) => a.id === id)!);
+    config.accounts = [...first, ...config.accounts.filter((a) => !ids.includes(a.id))];
+    // Raised lines belong to the main account alone.
+    for (const entry of config.accounts.slice(1)) delete entry.boost;
+  });
   return config;
 }
 
@@ -500,12 +540,13 @@ function applyAccountChanges(config: ClaudeAccountsConfig, id: string, changes: 
 
 export async function deleteAccount(paths: ClaudeAccountsPaths, id: string): Promise<boolean> {
   if (id === DEFAULT_ACCOUNT_ID) throw new Error('default 是 CLI 自己的登录，不能删除');
-  const config = readAccountsConfig(paths);
-  const before = config.accounts.length;
-  config.accounts = config.accounts.filter((a) => a.id !== id);
+  const { result: removedEntry } = await mutateAccountsConfig(paths, (config) => {
+    const before = config.accounts.length;
+    config.accounts = config.accounts.filter((a) => a.id !== id);
+    return config.accounts.length !== before;
+  });
   const removedSecret = await removeSecret(accountSecretId(id), paths.keystore).catch(() => false);
-  if (config.accounts.length !== before) await writeAccountsConfig(paths, config);
-  return removedSecret || config.accounts.length !== before;
+  return removedSecret || removedEntry === true;
 }
 
 export interface ClaudeAccountPoolOptions {
@@ -1399,11 +1440,11 @@ export async function switchToAccount(
   id: string,
   boost?: ClaudeAccountEntry['boost'],
 ): Promise<ClaudeAccountsConfig> {
-  const config = readAccountsConfig(paths);
-  if (!config.accounts.some((a) => a.id === id)) throw new Error(`没有账户：${id}`);
-  config.accounts = withMain(config.accounts, id);
-  if (boost && Object.keys(boost).length > 0) config.accounts[0]!.boost = boost;
-  await writeAccountsConfig(paths, config);
+  const { config } = await mutateAccountsConfig(paths, (config) => {
+    if (!config.accounts.some((a) => a.id === id)) throw new Error(`没有账户：${id}`);
+    config.accounts = withMain(config.accounts, id);
+    if (boost && Object.keys(boost).length > 0) config.accounts[0]!.boost = boost;
+  });
   return config;
 }
 

@@ -1,6 +1,7 @@
-import { mkdir, readdir, stat, unlink, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, stat, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { log } from '../core/logger';
+import { writeFileAtomic } from '../platform/atomic-write';
 import type { KnowledgeContext } from './inject';
 
 /** Snapshots kept: enough for every chat's current version and a few old ones. */
@@ -18,7 +19,8 @@ export async function writeKnowledgeSnapshot(dir: string, context: KnowledgeCont
     await mkdir(dir, { recursive: true });
     const exists = await stat(file).then(() => true, () => false);
     if (!exists) {
-      await writeFile(file, `${JSON.stringify(context, null, 2)}\n`, { mode: 0o600 });
+      // Atomic: a half-written snapshot would never be rewritten, its name being taken.
+      await writeFileAtomic(file, `${JSON.stringify(context, null, 2)}\n`, { mode: 0o600 });
       await prune(dir);
     }
     return file;
