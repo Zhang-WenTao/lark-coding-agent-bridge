@@ -26,6 +26,12 @@ export interface SchedulerOptions extends JobRunnerDeps {
   now?: () => number;
   /** Injectable for tests — defaults to the real agent run. */
   runJob?: (job: ScheduledJob) => Promise<JobRunRecord>;
+  /**
+   * How many scheduled fires may run at once (`cronMaxConcurrentJobs`).
+   * Default 1: due jobs wait their turn, one after another. Manual
+   * `/cron run` does not take a slot.
+   */
+  maxConcurrentJobs?: number;
 }
 
 /**
@@ -40,15 +46,19 @@ export class Scheduler {
   private readonly store: JobStore;
   private readonly now: () => number;
   private timer: NodeJS.Timeout | undefined;
-  private ticking = false;
+  /** Due or running jobs: a job here is never dispatched again until it ends. */
   private readonly inFlight = new Set<string>();
+  private readonly slots: Slots;
   /** Set by {@link stop}: runs that end after this were cut short by the shutdown. */
   private stopping = false;
+  /** Bumped by {@link stop}, so a fire queued before it knows not to start. */
+  private stops = 0;
 
   constructor(opts: SchedulerOptions) {
     this.opts = opts;
     this.store = opts.store;
     this.now = opts.now ?? Date.now;
+    this.slots = new Slots(Math.max(1, Math.floor(opts.maxConcurrentJobs ?? 1)));
   }
 
   /** The job list this scheduler drives — what `/cron` reads and edits. */
@@ -85,35 +95,61 @@ export class Scheduler {
   stop(): void {
     if (!this.timer) return;
     this.stopping = true;
+    this.stops++;
     clearInterval(this.timer);
     this.timer = undefined;
     log.info('scheduler', 'stopped', { inFlight: this.inFlight.size });
   }
 
   /**
-   * Fire everything that is due. Exposed for tests and for the "check right
-   * now" path; overlapping calls are dropped rather than queued.
+   * Dispatch everything that is due, and resolve once those runs (and any
+   * still queued for a slot) have ended. Exposed for tests and for the
+   * "check right now" path.
+   *
+   * Dispatch itself never waits, so a tick that comes while a long job is
+   * running still picks up newly due jobs: they queue for a slot (in list
+   * order) instead of waiting for that whole tick to finish, and the
+   * catch-up window is judged when a job falls due, not when its turn comes.
+   * A job already due or running is skipped, never queued twice.
    */
   async tick(): Promise<void> {
-    if (this.ticking) return;
-    this.ticking = true;
-    try {
-      const now = this.now();
-      for (const job of this.store.list()) {
-        if (!job.enabled || job.nextRunAt === undefined) continue;
-        if (job.nextRunAt > now) continue;
-        if (this.inFlight.has(job.id)) continue;
+    const now = this.now();
+    const stops = this.stops;
+    const dispatched: Promise<void>[] = [];
+    for (const job of this.store.list()) {
+      if (!job.enabled || job.nextRunAt === undefined) continue;
+      if (job.nextRunAt > now) continue;
+      if (this.inFlight.has(job.id)) continue;
 
-        const lateBy = now - job.nextRunAt;
-        if (job.schedule.kind === 'cron' && lateBy > CRON_CATCHUP_WINDOW_MS) {
-          log.info('scheduler', 'job-missed', { jobId: job.id, lateByMs: lateBy });
-          this.store.update(job.id, { nextRunAt: this.computeNextRun(job, now) });
-          continue;
-        }
-        await this.fire(job);
+      const lateBy = now - job.nextRunAt;
+      if (job.schedule.kind === 'cron' && lateBy > CRON_CATCHUP_WINDOW_MS) {
+        log.info('scheduler', 'job-missed', { jobId: job.id, lateByMs: lateBy });
+        this.store.update(job.id, { nextRunAt: this.computeNextRun(job, now) });
+        continue;
       }
+      this.inFlight.add(job.id);
+      dispatched.push(this.fireWhenFree(job.id, stops));
+    }
+    await Promise.all(dispatched);
+  }
+
+  /** Wait for a slot, then fire the job as it stands by then. */
+  private async fireWhenFree(jobId: string, stopsAtDispatch: number): Promise<void> {
+    const release = await this.slots.acquire();
+    try {
+      // Paused, deleted, re-armed to a later slot, or the bridge stopped
+      // while it waited: leave the slot alone so a resume, the new slot or
+      // the restarted bridge decides what runs.
+      const job = this.store.get(jobId);
+      const stopped = this.stops !== stopsAtDispatch;
+      if (!job?.enabled || job.nextRunAt === undefined || job.nextRunAt > this.now() || stopped) {
+        log.info('scheduler', 'job-dropped-from-queue', { jobId, stopped });
+        return;
+      }
+      await this.fire(job);
     } finally {
-      this.ticking = false;
+      this.inFlight.delete(jobId);
+      release();
     }
   }
 
@@ -122,7 +158,7 @@ export class Scheduler {
     const job = this.store.get(jobId);
     if (!job) return undefined;
     if (this.inFlight.has(jobId)) {
-      return { startedAt: this.now(), finishedAt: this.now(), ok: false, error: '该任务正在执行中' };
+      return { startedAt: this.now(), finishedAt: this.now(), ok: false, error: '该任务正在执行或排队中' };
     }
     return this.fire(job, { manual: true });
   }
@@ -231,4 +267,29 @@ export class Scheduler {
 
 function failureNotice(job: ScheduledJob, record: JobRunRecord): string {
   return `⏰ 定时任务 ${jobTitleMd(job)}（${scheduleLabel(job)}）执行失败：${record.error ?? '未知原因'}`;
+}
+
+/** A counting semaphore: at most `size` holders, waiters served in order. */
+class Slots {
+  private free: number;
+  private readonly waiting: Array<() => void> = [];
+
+  constructor(size: number) {
+    this.free = size;
+  }
+
+  async acquire(): Promise<() => void> {
+    if (this.free > 0) this.free--;
+    else await new Promise<void>((resolve) => this.waiting.push(resolve));
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      // Hand the slot straight to the next waiter, so a newcomer cannot
+      // overtake the queue between release and wake-up.
+      const next = this.waiting.shift();
+      if (next) next();
+      else this.free++;
+    };
+  }
 }

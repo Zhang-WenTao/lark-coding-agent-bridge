@@ -22,6 +22,7 @@ const channel = {
 function makeScheduler(opts: {
   now: () => number;
   runJob: (job: ScheduledJob) => Promise<JobRunRecord>;
+  maxConcurrentJobs?: number;
 }): Scheduler {
   return new Scheduler({
     store,
@@ -32,6 +33,7 @@ function makeScheduler(opts: {
     controls: {} as never,
     now: opts.now,
     runJob: opts.runJob,
+    ...(opts.maxConcurrentJobs ? { maxConcurrentJobs: opts.maxConcurrentJobs } : {}),
   });
 }
 
@@ -284,5 +286,162 @@ describe('scheduler ticking', () => {
     const scheduler = makeScheduler({ now: () => now, runJob: async () => ok() });
     const created = store.add(job({ schedule: { kind: 'cron', expr: 'not a cron' } }));
     expect(scheduler.armJob(created.id)?.nextRunAt).toBeUndefined();
+  });
+});
+
+describe('scheduler concurrency', () => {
+  const at = (hhmmss: string): number => new Date(`2026-09-22T${hhmmss}`).getTime();
+
+  /** A runJob whose runs stay open until the test releases them by prompt. */
+  function gatedRunner() {
+    const started: string[] = [];
+    const release = new Map<string, (r?: JobRunRecord) => void>();
+    const runJob = vi.fn(
+      (j: ScheduledJob) =>
+        new Promise<JobRunRecord>((resolve) => {
+          started.push(j.prompt);
+          release.set(j.prompt, (r) => resolve(r ?? ok()));
+        }),
+    );
+    return { started, release, runJob };
+  }
+
+  function dueAt(prompt: string, nextRunAt: number): ScheduledJob {
+    const created = store.add(job({ prompt }));
+    return store.update(created.id, { nextRunAt })!;
+  }
+
+  const settle = (): Promise<void> => new Promise((r) => setTimeout(r, 20));
+
+  it('runs due jobs one at a time, in list order, by default', async () => {
+    const { started, release, runJob } = gatedRunner();
+    const scheduler = makeScheduler({ now: () => at('09:00:30'), runJob });
+    dueAt('a', at('09:00:00'));
+    dueAt('b', at('09:00:00'));
+
+    const ticking = scheduler.tick();
+    await vi.waitFor(() => expect(started).toEqual(['a']));
+    await settle();
+    expect(started).toEqual(['a']);
+
+    release.get('a')!();
+    await vi.waitFor(() => expect(started).toEqual(['a', 'b']));
+    release.get('b')!();
+    await ticking;
+    expect(runJob).toHaveBeenCalledTimes(2);
+  });
+
+  it('overlaps jobs when more than one slot is allowed', async () => {
+    const { started, release, runJob } = gatedRunner();
+    const scheduler = makeScheduler({ now: () => at('09:00:30'), runJob, maxConcurrentJobs: 2 });
+    dueAt('a', at('09:00:00'));
+    dueAt('b', at('09:00:00'));
+    dueAt('c', at('09:00:00'));
+
+    const ticking = scheduler.tick();
+    await vi.waitFor(() => expect(started).toEqual(['a', 'b']));
+    await settle();
+    expect(started).toEqual(['a', 'b']);
+
+    release.get('b')!();
+    await vi.waitFor(() => expect(started).toEqual(['a', 'b', 'c']));
+    release.get('a')!();
+    release.get('c')!();
+    await ticking;
+  });
+
+  it('starts a job that falls due while another is still running, without firing the runner twice', async () => {
+    const { started, release, runJob } = gatedRunner();
+    let now = at('09:00:30');
+    const scheduler = makeScheduler({ now: () => now, runJob, maxConcurrentJobs: 2 });
+    dueAt('long', at('09:00:00'));
+    const first = scheduler.tick();
+    await vi.waitFor(() => expect(started).toEqual(['long']));
+
+    dueAt('later', at('10:00:00'));
+    now = at('10:00:30');
+    const second = scheduler.tick();
+    await vi.waitFor(() => expect(started).toEqual(['long', 'later']));
+    expect(runJob).toHaveBeenCalledTimes(2);
+
+    release.get('later')!();
+    await second;
+    release.get('long')!();
+    await first;
+  });
+
+  it('queues a job that falls due behind a long one instead of counting it as missed', async () => {
+    const { started, release, runJob } = gatedRunner();
+    let now = at('09:00:30');
+    const scheduler = makeScheduler({ now: () => now, runJob });
+    dueAt('long', at('09:00:00'));
+    const first = scheduler.tick();
+    await vi.waitFor(() => expect(started).toEqual(['long']));
+
+    const queued = dueAt('later', at('10:00:00'));
+    now = at('10:00:30');
+    const second = scheduler.tick();
+    await settle();
+    expect(started).toEqual(['long']);
+
+    // Seven hours on: past the catch-up window, but it was due and waiting all along.
+    now = at('17:00:00');
+    release.get('long')!();
+    await vi.waitFor(() => expect(started).toEqual(['long', 'later']));
+    release.get('later')!();
+    await Promise.all([first, second]);
+    expect(store.get(queued.id)?.lastRun?.ok).toBe(true);
+  });
+
+  it('drops a queued job that was paused while it waited', async () => {
+    const { started, release, runJob } = gatedRunner();
+    const scheduler = makeScheduler({ now: () => at('09:00:30'), runJob });
+    dueAt('a', at('09:00:00'));
+    const paused = dueAt('b', at('09:00:00'));
+
+    const ticking = scheduler.tick();
+    await vi.waitFor(() => expect(started).toEqual(['a']));
+    store.update(paused.id, { enabled: false });
+    release.get('a')!();
+    await ticking;
+
+    expect(started).toEqual(['a']);
+    expect(store.get(paused.id)?.lastRun).toBeUndefined();
+  });
+
+  it('leaves queued jobs for the restarted bridge when it stops', async () => {
+    const { started, release, runJob } = gatedRunner();
+    const scheduler = makeScheduler({ now: () => at('09:00:30'), runJob });
+    dueAt('a', at('09:00:00'));
+    const waiting = dueAt('b', at('09:00:00'));
+    scheduler.start();
+
+    const ticking = scheduler.tick();
+    await vi.waitFor(() => expect(started).toEqual(['a']));
+    scheduler.stop();
+    release.get('a')!({ startedAt: 1, finishedAt: 2, ok: false, terminal: 'interrupted', error: 'interrupted' });
+    await ticking;
+
+    expect(started).toEqual(['a']);
+    expect(store.get(waiting.id)?.nextRunAt).toBe(at('09:00:00'));
+    expect(store.get(waiting.id)?.lastRun).toBeUndefined();
+  });
+
+  it('refuses a manual run of a job that is still queued', async () => {
+    const { started, release, runJob } = gatedRunner();
+    const scheduler = makeScheduler({ now: () => at('09:00:30'), runJob });
+    dueAt('a', at('09:00:00'));
+    const queued = dueAt('b', at('09:00:00'));
+
+    const ticking = scheduler.tick();
+    await vi.waitFor(() => expect(started).toEqual(['a']));
+    const manual = await scheduler.runNow(queued.id);
+    expect(manual?.ok).toBe(false);
+    expect(manual?.error).toContain('排队');
+
+    release.get('a')!();
+    await vi.waitFor(() => expect(started).toEqual(['a', 'b']));
+    release.get('b')!();
+    await ticking;
   });
 });

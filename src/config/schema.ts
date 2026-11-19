@@ -210,6 +210,19 @@ export interface AppPreferences {
    */
   runIdleTimeoutMinutes?: number;
   /**
+   * How many scheduled (`/cron`) jobs may run at the same time. Default 1:
+   * due jobs run one after another, as they always have. Raise it when one
+   * long job should not hold back every other job of the profile. Clamped
+   * to [1, 5].
+   */
+  cronMaxConcurrentJobs?: number;
+  /**
+   * Hard cap on one scheduled run's wall-clock time, in minutes. Unlike
+   * `runIdleTimeoutMinutes` it also stops a run that keeps producing output.
+   * Unset / 0 = no cap (the default). Clamped to [1, 1440].
+   */
+  cronRunMaxMinutes?: number;
+  /**
    * 长任务完成提醒. A streamed reply card is updated in place, so finishing a
    * long run makes no sound on the requester's phone. When a group / topic run
    * — or a DM run whose answer landed in that in-place card — ends after at
@@ -789,6 +802,20 @@ export function getRunIdleTimeoutMs(cfg: AppConfig): number | undefined {
   if (typeof raw !== 'number' || !Number.isFinite(raw) || raw <= 0) return undefined;
   const clamped = Math.min(Math.max(Math.floor(raw), 1), 120);
   return clamped * 60_000;
+}
+
+/** How many scheduled jobs may run at once. See `cronMaxConcurrentJobs`. */
+export function getCronMaxConcurrentJobs(cfg: AppConfig): number {
+  const raw = cfg.preferences?.cronMaxConcurrentJobs;
+  if (typeof raw !== 'number' || !Number.isFinite(raw) || raw < 1) return 1;
+  return Math.min(Math.floor(raw), 5);
+}
+
+/** Wall-clock cap on one scheduled run in ms, or `undefined` when off. See `cronRunMaxMinutes`. */
+export function getCronRunMaxMs(cfg: AppConfig): number | undefined {
+  const raw = cfg.preferences?.cronRunMaxMinutes;
+  if (typeof raw !== 'number' || !Number.isFinite(raw) || raw <= 0) return undefined;
+  return Math.min(Math.max(Math.floor(raw), 1), 24 * 60) * 60_000;
 }
 
 const DEFAULT_LONG_RUN_NOTICE_MINUTES = 5;

@@ -21,7 +21,9 @@ const profileConfig = createDefaultProfileConfig({
   accounts: { app: { id: 'cli_test', secret: '${APP_SECRET}', tenant: 'feishu' } },
 });
 
-function makeDeps(overrides: { clear?: () => void; setCwd?: () => void } = {}) {
+function makeDeps(
+  overrides: { clear?: () => void; setCwd?: () => void; preferences?: Record<string, unknown> } = {},
+) {
   return {
     channel: {
       send: vi.fn(async (chatId: string, payload: Record<string, unknown>, opts?: unknown) => {
@@ -36,7 +38,7 @@ function makeDeps(overrides: { clear?: () => void; setCwd?: () => void } = {}) {
     controls: {
       profile: 'claude',
       profileConfig,
-      cfg: { accounts: profileConfig.accounts, preferences: {} },
+      cfg: { accounts: profileConfig.accounts, preferences: overrides.preferences ?? {} },
       botOwnerId: OWNER,
       ownerRefreshState: 'ok',
     },
@@ -87,7 +89,64 @@ beforeEach(() => {
   mocks.recordRunSessionEvent.mockReset();
 });
 
+/** A flow whose agent says something, then keeps working until stopped. */
+function flowThatNeverEnds() {
+  let wake!: () => void;
+  const stopped = new Promise<void>((resolve) => {
+    wake = resolve;
+  });
+  const stop = vi.fn(async () => wake());
+  return {
+    stop,
+    flow: {
+      ok: true as const,
+      execution: {
+        runId: 'run_1',
+        handle: { interrupted: false, run: { stop } },
+        subscribe: () => ({
+          async *[Symbol.asyncIterator]() {
+            yield { type: 'text', delta: '巡检做到一半' } as AgentEvent;
+            await stopped;
+          },
+        }),
+      },
+      policy: { policyFingerprint: 'fp' },
+      cwdRealpath: '/repo',
+    },
+  };
+}
+
 describe('scheduled job runs', () => {
+  it('stops a run that outlasts cronRunMaxMinutes and records it as failed', async () => {
+    vi.useFakeTimers();
+    try {
+      const { stop, flow } = flowThatNeverEnds();
+      mocks.startRunFlow.mockResolvedValue(flow);
+
+      const pending = runScheduledJob(makeDeps({ preferences: { cronRunMaxMinutes: 1 } }), job());
+      await vi.advanceTimersByTimeAsync(59_000);
+      expect(stop).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1_000);
+      const record = await pending;
+
+      expect(stop).toHaveBeenCalled();
+      expect(record.ok).toBe(false);
+      expect(record.terminal).toBe('max_duration');
+      expect(record.error).toContain('1 分钟上限');
+      // What it had done so far still reaches the chat.
+      expect(JSON.stringify(sent[0]?.payload)).toContain('巡检做到一半');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('leaves a run that finishes inside the cap alone', async () => {
+    mocks.startRunFlow.mockResolvedValue(flowEmitting(answer));
+    const record = await runScheduledJob(makeDeps({ preferences: { cronRunMaxMinutes: 30 } }), job());
+    expect(record.ok).toBe(true);
+    expect(record.terminal).toBe('done');
+  });
+
   it('runs the job and delivers the answer to its chat', async () => {
     mocks.startRunFlow.mockResolvedValue(flowEmitting(answer));
     const deps = makeDeps();

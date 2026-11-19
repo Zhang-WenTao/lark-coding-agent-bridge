@@ -59,6 +59,7 @@ import {
   effortPrefForChat,
   getAgentStopGraceMs,
   getCotMessages,
+  getCronMaxConcurrentJobs,
   getMaxConcurrentRuns,
   getMessageReplyMode,
   getLongRunNoticeMs,
@@ -971,6 +972,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       ...(sessionCatalog ? { sessionCatalog } : {}),
       workspaces,
       controls,
+      maxConcurrentJobs: getCronMaxConcurrentJobs(controls.cfg),
     });
     scheduler.start();
     controls.scheduler = scheduler;

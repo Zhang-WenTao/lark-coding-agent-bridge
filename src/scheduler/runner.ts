@@ -13,7 +13,13 @@ import { buildKnowledgeContext, nativeSkillOption } from '../knowledge/inject';
 import { isCreator } from '../policy/access';
 import { findRelevantNotes } from '../knowledge/relevance';
 import type { Controls } from '../commands/types';
-import { effortPrefForChat, getMessageReplyMode, getRunIdleTimeoutMs, getShowToolCalls } from '../config/schema';
+import {
+  effortPrefForChat,
+  getCronRunMaxMs,
+  getMessageReplyMode,
+  getRunIdleTimeoutMs,
+  getShowToolCalls,
+} from '../config/schema';
 import { log } from '../core/logger';
 import { canUseDm, canUseGroup } from '../policy/access';
 import type { RunExecutor } from '../runtime/run-executor';
@@ -115,6 +121,23 @@ export async function runScheduledJob(
     resumed: Boolean(flow.resumeFrom),
   });
 
+  // The idle watchdog only catches a silent agent; one that keeps working
+  // past `cronRunMaxMinutes` is stopped the same way, so it cannot hold a
+  // slot (and with it every job queued behind) for hours.
+  const maxMs = getCronRunMaxMs(deps.controls.cfg);
+  let overran = false;
+  const cap = maxMs
+    ? setTimeout(() => {
+        overran = true;
+        const { handle } = flow.execution;
+        handle.interrupted = true;
+        log.warn('scheduler', 'job-overran', { jobId: job.id, maxMinutes: maxMs / 60_000 });
+        void handle.run.stop().catch(() => {
+          /* stop errors are non-fatal */
+        });
+      }, maxMs)
+    : undefined;
+
   let state: RunState;
   try {
     state = await processAgentStream(
@@ -136,6 +159,8 @@ export async function runScheduledJob(
   } catch (err) {
     log.fail('scheduler', err, { jobId: job.id, step: 'stream' });
     return fail(err instanceof Error ? err.message : String(err));
+  } finally {
+    if (cap) clearTimeout(cap);
   }
 
   const visible = getShowToolCalls(deps.controls.cfg)
@@ -147,17 +172,27 @@ export async function runScheduledJob(
   });
 
   const ok = state.terminal === 'done';
+  // Stopped by the cap, not by a person or a shutdown: its own terminal, so
+  // the scheduler counts it as a failure rather than a restart to replay.
+  const terminal = !ok && overran ? 'max_duration' : state.terminal;
   log.info('scheduler', 'job-finished', {
     jobId: job.id,
-    terminal: state.terminal,
+    terminal,
     durationMs: Date.now() - startedAt,
   });
   return {
     startedAt,
     finishedAt: Date.now(),
     ok,
-    terminal: state.terminal,
-    ...(ok ? {} : { error: state.errorMsg ?? `运行结束状态：${state.terminal}` }),
+    terminal,
+    ...(ok
+      ? {}
+      : {
+          error:
+            terminal === 'max_duration'
+              ? `运行超过 ${maxMs! / 60_000} 分钟上限，已停止`
+              : (state.errorMsg ?? `运行结束状态：${state.terminal}`),
+        }),
   };
 }
 
