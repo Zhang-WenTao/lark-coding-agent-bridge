@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { NormalizedMessage } from '@larksuite/channel';
 import type { ProfileAccess, RestrictedChat } from '../config/profile-schema';
+import { expandHome } from '../platform/paths';
 import { isCreator, type RuntimeControls } from './access';
 
 /** What a restricted chat answers when a step is refused (`access.restrictedChats`). */
@@ -130,7 +131,7 @@ export function ownerOnlyGuard(opts: {
   const root = opts.root ?? bridgeRoot();
   const lc = opts.larkChannelHome;
   const claude = join(home, '.claude');
-  const expand = (p: string): string => (p === '~' ? home : p.startsWith('~/') ? join(home, p.slice(2)) : p);
+  const expand = (p: string): string => expandHome(p, home);
   const readOnlyRoots = (opts.guestReadOnlyRoots ?? []).map(expand);
   const media = `${escapeRe(lc)}/profiles/[^/]+/media/`;
   const notesRoot = `${escapeRe(lc)}/profiles/[^/]+/knowledge/notes`;
@@ -226,7 +227,7 @@ export function restrictedChatGuard(
   opts: { home?: string; root?: string } = {},
 ): RunGuard {
   const home = guard?.home ?? opts.home ?? homedir();
-  const expand = (p: string): string => (p === '~' ? home : p.startsWith('~/') ? join(home, p.slice(2)) : p);
+  const expand = (p: string): string => expandHome(p, home);
   const base: RunGuard = guard ?? {
     home,
     rules: [],
@@ -300,7 +301,7 @@ export function guestAccessInstruction(guard: RunGuard): string | undefined {
 export function restrictedChatWorkspace(chat: RestrictedChat, home: string = homedir()): string | undefined {
   const p = chat.workspace;
   if (!p) return undefined;
-  return p === '~' ? home : p.startsWith('~/') ? join(home, p.slice(2)) : p;
+  return expandHome(p, home);
 }
 
 /** What the agent is told in a restricted chat; the guard enforces the same. */

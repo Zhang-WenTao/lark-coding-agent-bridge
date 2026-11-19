@@ -1,6 +1,5 @@
 import { randomBytes } from 'node:crypto';
 import { mkdir, readdir, readFile, realpath, rm } from 'node:fs/promises';
-import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { agentCapability } from '../agent/capability';
 import { resolveEffortArg, resolveModelArg } from '../agent/models';
@@ -28,6 +27,7 @@ import { log } from '../core/logger';
 import { maskUrlCredentials } from '../knowledge/libraries';
 import type { KnowledgeStore, MemoryEntry, SkillSummary } from '../knowledge/store';
 import { knowledgeRemoteUrl } from '../knowledge/sync';
+import { expandHome } from '../platform/paths';
 import { evaluateRunPolicy, type RunPolicyAllow } from '../policy/run-policy';
 import type { RunExecution, SubmitRunInput } from '../runtime/run-executor';
 import type { SessionCatalog, SessionCatalogEntry } from '../session/catalog';
@@ -61,7 +61,7 @@ import { formatDreamRun } from './format';
 import { formatAfterRun, runAfterAutoCommands } from './after-run';
 import { acquireDreamLocks, type HeldDreamLocks } from './lock';
 import { buildDreamScopePrompt, buildExternalLearningPrompt } from './prompt';
-import { CandidatePool, candidateOf, needsPool, planPool, POOL_READ_DAYS, scopeFamily, type PoolCandidate, type PoolTheme } from './pool';
+import { CandidatePool, candidateOf, needsPool, planPool, POOL_READ_DAYS, type PoolCandidate, type PoolTheme } from './pool';
 import { RecallStore } from './recall';
 import { buildRemPrompt, parseRemOutput, remWorthRunning } from './rem';
 import {
@@ -2024,7 +2024,7 @@ export class DreamService {
       (item) => item.repo === repo,
     )?.url;
     for (const raw of url ? resolveDreamSettings(this.deps.appConfig().preferences?.dreamTuning).localClones : []) {
-      const dir = raw.startsWith('~/') ? join(homedir(), raw.slice(2)) : raw;
+      const dir = expandHome(raw);
       const pulled = await pullLocalClone(dir, url!);
       if ('error' in pulled) log.warn('dream', 'local-clone-pull-failed', { batch: id, error: pulled.error });
     }

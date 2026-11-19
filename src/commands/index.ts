@@ -1,6 +1,5 @@
 import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
-import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute } from 'node:path';
 import { agentAccountsReport, agentAccountsTable, switchAgentAccount } from '../agent/account';
 import { agentCapability } from '../agent/capability';
@@ -147,6 +146,7 @@ import type { SessionCatalogIdentity } from '../session/catalog';
 import { isAlive, readAndPrune, resolveTarget } from '../runtime/registry';
 import { readUiSidecar } from '../ui/sidecar';
 import { resolveWorkingDirectory } from '../policy/workspace';
+import { expandHome } from '../platform/paths';
 import { evaluateRunPolicy } from '../policy/run-policy';
 import type { RunExecutor } from '../runtime/run-executor';
 import { RunRejected } from '../runtime/errors';
@@ -396,12 +396,6 @@ function isMessageAuditReject(err: unknown): boolean {
   return /not pass the audit/i.test(message);
 }
 
-function expandTilde(p: string): string {
-  if (p === '~') return homedir();
-  if (p.startsWith('~/')) return `${homedir()}${p.slice(1)}`;
-  return p;
-}
-
 function isAbsoluteOrTilde(p: string): boolean {
   return isAbsolute(p) || p === '~' || p.startsWith('~/');
 }
@@ -475,7 +469,7 @@ async function handleCd(args: string, ctx: CommandContext): Promise<void> {
     await reply(ctx, '请使用绝对路径，或 `~/xxx` 表示 home 下的子路径。');
     return;
   }
-  const absolute = expandTilde(input);
+  const absolute = expandHome(input);
   const workspace = await resolveWorkingDirectory(absolute);
   if (!workspace.ok) {
     await reply(ctx, workspace.userVisible);

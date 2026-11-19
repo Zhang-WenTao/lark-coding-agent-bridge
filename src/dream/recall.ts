@@ -11,10 +11,10 @@
  */
 import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
 import type { AgentTranscript } from '../agent/transcript-builder';
 import { log } from '../core/logger';
 import { writeFileAtomic } from '../platform/atomic-write';
+import { expandHome } from '../platform/paths';
 import { exchangeHash } from './select';
 import type { DreamSessionRecord } from './state';
 
@@ -78,7 +78,7 @@ const DAY_MS = 86_400_000;
  * `skills/<dir>/SKILL.md` (own or a library's), undefined for anything else.
  */
 export function recallKey(path: string, knowledgeDir: string, home: string = homedir()): string | undefined {
-  const full = path.startsWith('~/') ? join(home, path.slice(2)) : path;
+  const full = expandHome(path, home);
   const notes = `${knowledgeDir.replace(/\/+$/, '')}/notes/`;
   if (full.startsWith(notes)) {
     const match = /^([\w.-]+)\/([a-z0-9][a-z0-9-]*)\.md$/.exec(full.slice(notes.length));

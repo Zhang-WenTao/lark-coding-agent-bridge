@@ -1,11 +1,11 @@
 import { lstat, mkdir, readdir, readFile, realpath, rm } from 'node:fs/promises';
-import { homedir } from 'node:os';
 import { dirname, join, relative, sep } from 'node:path';
 import type { DreamExternalLibraryConfig } from '../config/schema';
 import { git, isSafeRef, type GitResult } from '../git/exec';
 import { maskUrlCredentials } from '../knowledge/libraries';
 import { parseSkillHeader } from '../knowledge/store';
 import { isPlausibleGitUrl } from '../knowledge/sync';
+import { expandHome } from '../platform/paths';
 import { maskSecrets } from './secrets';
 
 /**
@@ -169,7 +169,7 @@ export async function collectExternalMaterial(input: {
 export async function listLocalSkills(dirs: readonly string[]): Promise<Array<{ name: string; description: string }>> {
   const out: Array<{ name: string; description: string }> = [];
   for (const raw of dirs) {
-    const dir = raw.startsWith('~/') ? join(homedir(), raw.slice(2)) : raw;
+    const dir = expandHome(raw);
     let names: string[];
     try {
       names = await readdir(dir);
