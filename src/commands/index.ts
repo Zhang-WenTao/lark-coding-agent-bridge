@@ -90,7 +90,7 @@ import {
   scheduleSummaryPlain,
   truncate,
 } from '../scheduler/command';
-import { formatTime, jobScopeId } from '../scheduler/runner';
+import { jobScopeId } from '../scheduler/runner';
 import type { ScheduledJob } from '../scheduler/types';
 import type { AppConfig, AppPreferences, EffortLevel, MessageReplyMode, TenantBrand } from '../config/schema';
 import {
@@ -163,6 +163,7 @@ import type { MeetingSession } from '../meeting/session';
 import { hasStructuredLarkCliUserAuth } from '../lark-cli/identity-policy';
 import { isPlainCoffeeRequest } from './coffee-intent';
 import { formatDreamPrs, formatDreamRevert, formatDreamRun, formatDreamStatus } from '../dream/format';
+import { formatAgoCompact, formatDateTime, formatMonthDayTime } from '../core/time-format';
 
 export type { CommandContext, Controls } from './types';
 import type { CommandContext } from './types';
@@ -1182,7 +1183,7 @@ async function handlePs(_args: string, ctx: CommandContext): Promise<void> {
     '|---|---|---|---|',
   ];
   for (const [idx, e] of live.entries()) {
-    const ago = formatAgo(Date.now() - new Date(e.startedAt).getTime());
+    const ago = formatAgoCompact(Date.now() - new Date(e.startedAt).getTime());
     const me = e.id === ctx.controls.processId ? ' ← 当前正在回复' : '';
     const bot = e.botName ? `${e.botName} (\`${e.appId}\`)` : `\`${e.appId}\``;
     rows.push(`| ${idx + 1} | \`${e.id}\`${me} | ${bot} | ${ago} |`);
@@ -1247,13 +1248,6 @@ async function handleExit(args: string, ctx: CommandContext): Promise<void> {
   } else {
     await reply(ctx, `✓ 已关闭 bot \`${entry.id}\`。`);
   }
-}
-
-function formatAgo(ms: number): string {
-  if (ms < 60_000) return `${Math.floor(ms / 1000)}s 前`;
-  if (ms < 3_600_000) return `${Math.floor(ms / 60_000)}m 前`;
-  if (ms < 86_400_000) return `${Math.floor(ms / 3_600_000)}h 前`;
-  return `${Math.floor(ms / 86_400_000)}d 前`;
 }
 
 async function handleReconnect(args: string, ctx: CommandContext): Promise<void> {
@@ -1851,9 +1845,7 @@ async function handleAudit(args: string, ctx: CommandContext): Promise<void> {
   }
   const chats = new Map((ctx.controls.knownChats ?? []).map((c) => [c.id, c.name]));
   const lines = entries.map((e) => {
-    const d = new Date(e.at);
-    const pad = (x: number): string => String(x).padStart(2, '0');
-    const when = `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    const when = formatMonthDayTime(e.at);
     const who = e.actorId === ctx.msg.senderId ? '你' : (e.actorName ?? `…${e.actorId.slice(-6)}`);
     const where = e.chatId ? (chats.get(e.chatId) ?? '会话') : e.source;
     const what = `${toolLabel(e.tool)} \`${e.summary.replace(/`/g, "'").slice(0, 80)}\``;
@@ -2391,8 +2383,8 @@ async function skillLibraryList(
           ...(status.config.exclude ? { exclude: status.config.exclude } : {}),
           present: status.present,
           ...(status.commit ? { commit: status.commit } : {}),
-          ...(status.commitAt ? { commitAgo: formatAgo(now - status.commitAt) } : {}),
-          ...(status.lastSyncAt ? { lastSyncAgo: formatAgo(now - status.lastSyncAt) } : {}),
+          ...(status.commitAt ? { commitAgo: formatAgoCompact(now - status.commitAt) } : {}),
+          ...(status.lastSyncAt ? { lastSyncAgo: formatAgoCompact(now - status.lastSyncAt) } : {}),
           ...(status.lastError ? { lastError: status.lastError } : {}),
           skills: status.skills.map((skill) => skill.name),
           shadowed: shadowedSkills(status, merged),
@@ -2625,7 +2617,7 @@ function knowledgeAutoSyncView(
   return {
     ...view,
     lastSync: {
-      ago: formatAgo(Date.now() - last.at),
+      ago: formatAgoCompact(Date.now() - last.at),
       auto: last.trigger === 'auto',
       ok: last.ok,
       ...(last.error ? { error: last.error } : {}),
@@ -2776,7 +2768,7 @@ async function cronAdd(args: string, ctx: CommandContext, scheduler: Scheduler):
     [
       `✅ 已创建定时任务 ${jobTitleMd(armed)}`,
       `- 计划：${scheduleSummary(armed)}`,
-      `- 下次运行：${armed.nextRunAt ? formatTime(armed.nextRunAt) : '未排期'}`,
+      `- 下次运行：${armed.nextRunAt ? formatDateTime(armed.nextRunAt) : '未排期'}`,
       `- 工作目录：\`${armed.cwd ?? '(profile 默认)'}\``,
       `- 会话：${armed.session === 'continue' ? '跨次复用' : '每次新建'}`,
       '',
@@ -2798,7 +2790,7 @@ async function cronShow(id: string, ctx: CommandContext, scheduler: Scheduler): 
     `- 状态：${jobStatusLine(job)}`,
     `- 工作目录：\`${job.cwd ?? '(profile 默认)'}\``,
     `- 会话：${job.session === 'continue' ? '跨次复用' : '每次新建'}`,
-    `- 创建于：${formatTime(job.createdAt)}`,
+    `- 创建于：${formatDateTime(job.createdAt)}`,
   ];
   const last = lastRunLine(job);
   if (last) lines.push(`- ${last}`);
@@ -2841,7 +2833,7 @@ async function cronToggle(
   await reply(
     ctx,
     enabled
-      ? `▶️ 已恢复 ${jobTitleMd(job)}，下次运行：${armed?.nextRunAt ? formatTime(armed.nextRunAt) : '未排期'}`
+      ? `▶️ 已恢复 ${jobTitleMd(job)}，下次运行：${armed?.nextRunAt ? formatDateTime(armed.nextRunAt) : '未排期'}`
       : `⏸ 已暂停 ${jobTitleMd(job)}${stopped ? '，并中断了正在执行的那次运行' : ''}。`,
   );
 }

@@ -236,11 +236,7 @@ const en: RunStrings = {
 const TABLE: Record<Locale, RunStrings> = { zh, en };
 
 /** `10-02 23:40`, in the bridge host's local time. */
-export function formatMoment(ms: number): string {
-  const d = new Date(ms);
-  const pad = (n: number): string => String(n).padStart(2, '0');
-  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
-}
+export { formatMonthDayTime as formatMoment } from '../core/time-format';
 
 export function runStrings(locale: Locale | undefined): RunStrings {
   return TABLE[locale ?? 'zh'];

@@ -1,4 +1,5 @@
 import { humanIdle, humanTokens, type RotationReason } from '../session/smart-session';
+import { formatMonthDayTime } from '../core/time-format';
 
 interface ButtonSpec {
   text: string;
@@ -881,11 +882,7 @@ export function overloadCard(input: {
   /** Owners (`ou_…`) of the bots that asked, @-ed at the top — never a bot. */
   owners?: readonly string[];
 }): object {
-  const pad = (n: number) => String(n).padStart(2, '0');
-  const time = (at: number) => {
-    const d = new Date(at);
-    return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
-  };
+  const time = formatMonthDayTime;
   const gauge = (percent: number) => {
     const filled = Math.max(0, Math.min(10, Math.round(percent / 10)));
     return `${'█'.repeat(filled)}${'░'.repeat(10 - filled)}`;

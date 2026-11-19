@@ -7,6 +7,7 @@ import { withFileLock } from '../../platform/file-lock';
 import type { AgentEvent } from '../types';
 import type { QuotaReading, QuotaWindow } from '../quota-window';
 import { isOffDay, refreshHolidays } from './off-days';
+import { formatMonthDayTime } from '../../core/time-format';
 
 /**
  * Several Claude subscription accounts behind one profile, so a run can move
@@ -1054,7 +1055,7 @@ export function accountsReport(
     .pausedAccounts()
     .map(
       ({ account, until }) =>
-        `- **${displayName(account, defaultLabel, view, 'sad')}**（已暂停，${account.id}；切换线 5h ${pool.lineOf(account.id, 'five_hour')}% · 周 ${pool.lineOf(account.id, 'seven_day')}%）：⏸ 暂停到 ${formatClock(until)}，到期自动恢复`,
+        `- **${displayName(account, defaultLabel, view, 'sad')}**（已暂停，${account.id}；切换线 5h ${pool.lineOf(account.id, 'five_hour')}% · 周 ${pool.lineOf(account.id, 'seven_day')}%）：⏸ 暂停到 ${formatMonthDayTime(until)}，到期自动恢复`,
     );
   const active = pool.status().map(({ account, state }, index) => {
     const refusedAt = pool.refusedUntil(account.id, now);
@@ -1082,7 +1083,7 @@ export function accountsReport(
     const past = pool.pastLine(account.id, now);
     const flag =
       refused !== undefined
-        ? ` · ⛔ 额度用尽，${formatClock(refused)} 恢复`
+        ? ` · ⛔ 额度用尽，${formatMonthDayTime(refused)} 恢复`
         : past
           ? ` · ⚠️ 已过${WINDOW_LABELS[past.kind]}切换线，其他账户也到线后才轮到它`
           : '';
@@ -1118,7 +1119,7 @@ export function offDayNote(pool: ClaudeAccountPool, now = Date.now()): string | 
 export function pausedNote(pool: ClaudeAccountPool, view: AccountNameView = {}): string | undefined {
   const paused = pool.pausedAccounts();
   if (paused.length === 0) return undefined;
-  const names = paused.map(({ account, until }) => `${displayName(account, undefined, view, 'sad')}（${account.id}）到 ${formatClock(until)}`);
+  const names = paused.map(({ account, until }) => `${displayName(account, undefined, view, 'sad')}（${account.id}）到 ${formatMonthDayTime(until)}`);
   return `⏸ 已暂停：${names.join('、')}，期间不参与选号，到期自动恢复。`;
 }
 
@@ -1142,16 +1143,10 @@ export function findPausedAccount(
 
 /** `已暂停到 11-13 00:00` — the reason a switch by name does not go to a paused account. */
 export function pausedRefusal(until: number): string {
-  return `已暂停到 ${formatClock(until)}，到期自动恢复`;
+  return `已暂停到 ${formatMonthDayTime(until)}，到期自动恢复`;
 }
 
 /** `10-21 15:00` in the machine's time zone. */
-function formatClock(at: number): string {
-  const d = new Date(at);
-  const pad = (n: number): string => String(n).padStart(2, '0');
-  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
-}
-
 // ─── Account table and switching (`/accounts`, `claude-account switch`) ─────
 
 /** Weights of the switch score's three terms (see {@link switchScore}). */
@@ -1354,7 +1349,7 @@ function windowCell(view: AccountWindowView, format: (ms: number) => string): st
 }
 
 function stateCell(row: AccountRow): string {
-  if (row.refusedUntil !== undefined) return `⛔ 额度用尽，${formatClock(row.refusedUntil)} 恢复`;
+  if (row.refusedUntil !== undefined) return `⛔ 额度用尽，${formatMonthDayTime(row.refusedUntil)} 恢复`;
   if (row.pastLine) return `⚠️ 已过${WINDOW_LABELS[row.pastLine]}切换线`;
   if (!row.known) return '还没运行过';
   const state = row.next ? '使用中' : '可用';
@@ -1494,7 +1489,7 @@ export function parseSwitchQuery(query: string | undefined): { name?: string; li
  * raise already on the account does not count: a switch replaces it.
  */
 export function switchRefusal(pool: ClaudeAccountPool, row: AccountRow, line?: number): string | undefined {
-  if (row.refusedUntil !== undefined) return `额度用尽，${formatClock(row.refusedUntil)} 恢复`;
+  if (row.refusedUntil !== undefined) return `额度用尽，${formatMonthDayTime(row.refusedUntil)} 恢复`;
   for (const kind of WINDOW_KINDS) {
     const used = row.windows[kind].usedPercent;
     const limit = Math.max(pool.baseLineOf(row.id, kind), pool.inGrace(row.id, kind) ? GRACE_LINE : 0, line ?? 0);

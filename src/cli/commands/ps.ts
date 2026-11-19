@@ -2,6 +2,7 @@ import { SUPERVISOR_SERVICE_ID } from '../../daemon/paths';
 import { getServiceAdapter } from '../../daemon/service-adapter';
 import { readAndPrune, resolveTarget, isAlive } from '../../runtime/registry';
 import type { ProcessEntry } from '../../runtime/registry';
+import { formatAgoCompact } from '../../core/time-format';
 
 /**
  * Pretty-print the list of running lark-channel-bridge processes.
@@ -18,7 +19,7 @@ export function runPs(): void {
   }
   console.log(`# 当前共 ${live.length} 个 bot 在运行\n`);
   const rows = live.map((e, idx) => {
-    const ago = formatAgo(Date.now() - new Date(e.startedAt).getTime());
+    const ago = formatAgoCompact(Date.now() - new Date(e.startedAt).getTime());
     const app = e.botName ? `${e.botName} (${e.appId})` : e.appId;
     return {
       idx: String(idx + 1),
@@ -126,13 +127,6 @@ export async function stopProcessEntry(
     await new Promise((r) => setTimeout(r, 100));
   }
   throw new Error(`process ${entry.pid} did not exit after SIGKILL`);
-}
-
-function formatAgo(ms: number): string {
-  if (ms < 60_000) return `${Math.floor(ms / 1000)}s 前`;
-  if (ms < 3_600_000) return `${Math.floor(ms / 60_000)}m 前`;
-  if (ms < 86_400_000) return `${Math.floor(ms / 3_600_000)}h 前`;
-  return `${Math.floor(ms / 86_400_000)}d 前`;
 }
 
 /** Minimal fixed-width table. Header row is index 0. */

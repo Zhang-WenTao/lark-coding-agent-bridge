@@ -28,6 +28,7 @@ import type { SessionStore } from '../session/store';
 import type { WorkspaceStore } from '../workspace/store';
 import { describeCron } from './cron';
 import { jobTitleMd, type JobRunRecord, type ScheduledJob } from './types';
+import { formatDateTime } from '../core/time-format';
 
 export interface JobRunnerDeps {
   channel: LarkChannel;
@@ -276,14 +277,9 @@ function headedState(state: RunState, header: string): RunState {
 
 export function scheduleLabel(job: ScheduledJob): string {
   if (job.schedule.kind === 'cron') return describeCron(job.schedule.expr);
-  return `单次 ${formatTime(job.schedule.at)}`;
+  return `单次 ${formatDateTime(job.schedule.at)}`;
 }
 
-export function formatTime(epochMs: number): string {
-  const d = new Date(epochMs);
-  const pad = (n: number): string => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
-}
 
 /**
  * Frame the ask so the agent knows it is running unattended: nobody is waiting
@@ -320,7 +316,7 @@ async function buildJobPrompt(
     ...(knowledge ? [promptSection('bridge_knowledge', knowledge), ''] : []),
     ...(relevant ? [promptSection('relevant_notes', relevant), ''] : []),
     `[定时任务 ${job.id}]`,
-    `本次运行由 bridge 调度器在 ${formatTime(firedAt)} 触发（${scheduleLabel(job)}），没有人在旁边等着回答追问。`,
+    `本次运行由 bridge 调度器在 ${formatDateTime(firedAt)} 触发（${scheduleLabel(job)}），没有人在旁边等着回答追问。`,
     '请直接完成任务并给出可以直接发到群里的结论；需要澄清的地方按最合理的假设推进，并在结论里说明假设。',
     '',
     '任务内容：',

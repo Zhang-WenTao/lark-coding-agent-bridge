@@ -2,6 +2,7 @@ import type { LarkChannel, MentionInfo } from '@larksuite/channel';
 import { log } from '../core/logger';
 import { planLongRunNotice, sendLongRunNotice, type LongRunRequester } from './long-run-notice';
 import { addDoneReaction } from './reaction';
+import { formatHourMinute } from '../core/time-format';
 
 /**
  * 后台任务的原消息. A run that answers while background tasks it started
@@ -62,7 +63,7 @@ export type BackgroundOutcome = 'done' | 'stopped';
 
 /** `17:27「/medium /high …」` — enough to find a message in the chat. */
 export function describeMessage(m: { preview: string; sentAt: number }): string {
-  return `${formatClock(m.sentAt)}「${m.preview}」`;
+  return `${formatHourMinute(m.sentAt)}「${m.preview}」`;
 }
 
 /** What a waiting message is told when its result landed under another message. */
@@ -159,8 +160,3 @@ export async function settleBackgroundOrigins(input: SettleInput): Promise<void>
 }
 
 /** `17:27`, in the bridge host's local time. */
-function formatClock(ms: number): string {
-  const d = new Date(ms);
-  const pad = (n: number): string => String(n).padStart(2, '0');
-  return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
-}

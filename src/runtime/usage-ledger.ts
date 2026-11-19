@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises';
 import type { AgentEvent } from '../agent/types';
 import { log } from '../core/logger';
 import { writeFileAtomic } from '../platform/atomic-write';
+import { formatLocalDate } from '../core/time-format';
 
 export interface UsageTotals {
   /** Agent turns (one per usage report). */
@@ -61,9 +62,7 @@ function addInto(target: UsageTotals, add: UsageTotals): void {
 }
 
 export function localDayKey(at: number): string {
-  const d = new Date(at);
-  const pad = (n: number): string => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  return formatLocalDate(at);
 }
 
 /**

@@ -13,6 +13,7 @@ import { join } from 'node:path';
 
 import { log } from '../../core/logger';
 import { writeFileAtomic } from '../../platform/atomic-write';
+import { formatLocalDate } from '../../core/time-format';
 
 const SOURCES = [
   'https://raw.githubusercontent.com/NateScarlet/holiday-cn/master/{y}.json',
@@ -34,10 +35,9 @@ const fetching = new Map<string, number>();
 
 function localDate(now: number): { year: number; key: string; weekday: number } {
   const d = new Date(now);
-  const pad = (n: number): string => String(n).padStart(2, '0');
   return {
     year: d.getFullYear(),
-    key: `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`,
+    key: formatLocalDate(now),
     weekday: d.getDay(),
   };
 }

@@ -1,5 +1,5 @@
 import { CronParseError, describeCron, nextCronTime, parseCron } from './cron';
-import { formatTime } from './runner';
+import { formatDateTime } from '../core/time-format';
 import type { JobSchedule, ScheduledJob } from './types';
 
 export { jobTitle, jobTitleMd } from './types';
@@ -189,29 +189,29 @@ export function parseAbsoluteTime(input: string, now: number): number | undefine
 export function scheduleSummary(job: ScheduledJob): string {
   return job.schedule.kind === 'cron'
     ? `${describeCron(job.schedule.expr)}（\`${job.schedule.expr}\`）`
-    : `单次 ${formatTime(job.schedule.at)}`;
+    : `单次 ${formatDateTime(job.schedule.at)}`;
 }
 
 /** {@link scheduleSummary} without markdown, for plain_text card fields. */
 export function scheduleSummaryPlain(job: ScheduledJob): string {
   return job.schedule.kind === 'cron'
     ? `${describeCron(job.schedule.expr)}（${job.schedule.expr}）`
-    : `单次 ${formatTime(job.schedule.at)}`;
+    : `单次 ${formatDateTime(job.schedule.at)}`;
 }
 
 /** One-line status used in the list card. */
 export function jobStatusLine(job: ScheduledJob): string {
   if (!job.enabled) return '⏸ 已暂停';
   if (job.nextRunAt === undefined) return '⚠️ 未排期';
-  return `下次 ${formatTime(job.nextRunAt)}`;
+  return `下次 ${formatDateTime(job.nextRunAt)}`;
 }
 
 export function lastRunLine(job: ScheduledJob): string | undefined {
   if (!job.lastRun) return undefined;
   const { ok, finishedAt, error } = job.lastRun;
   return ok
-    ? `上次 ${formatTime(finishedAt)} ✅`
-    : `上次 ${formatTime(finishedAt)} ❌ ${error ?? ''}`.trim();
+    ? `上次 ${formatDateTime(finishedAt)} ✅`
+    : `上次 ${formatDateTime(finishedAt)} ❌ ${error ?? ''}`.trim();
 }
 
 export function truncate(text: string, max: number): string {

@@ -1,6 +1,7 @@
 import { formatChars } from './schedule';
 import type { DreamRevertResult, DreamStatusView } from './service';
 import type { DreamRun, DreamTarget } from './state';
+import { formatMonthDayTime } from '../core/time-format';
 
 /** Chat text for `/practice`: status, a finished run, the PR list. Counts and links only — never draft content. */
 
@@ -42,8 +43,8 @@ export function formatDreamStatus(view: DreamStatusView): string {
       : []),
     ...externalLines(view),
   ];
-  if (view.lastSucceededAt) lines.push(`- 上次完成：${formatTime(view.lastSucceededAt)}`);
-  if (view.running) lines.push(`- 进行中：批次 \`${view.running.id}\`（${STATUS_LABEL[view.running.status]}，${formatTime(view.running.startedAt)} 开始）`);
+  if (view.lastSucceededAt) lines.push(`- 上次完成：${formatMonthDayTime(view.lastSucceededAt)}`);
+  if (view.running) lines.push(`- 进行中：批次 \`${view.running.id}\`（${STATUS_LABEL[view.running.status]}，${formatMonthDayTime(view.running.startedAt)} 开始）`);
   lines.push(...autoLines(view));
   if (view.runs.length > 0) {
     lines.push('', '**最近几轮**');
@@ -110,8 +111,8 @@ function autoLines(view: DreamStatusView): string[] {
   if (check) {
     lines.push(
       check.started
-        ? `- 上次检查（${formatTime(check.at)}）：开始了批次 \`${check.started}\``
-        : `- 上次检查（${formatTime(check.at)}）：没跑——${check.reason ?? check.block ?? '未知'}`,
+        ? `- 上次检查（${formatMonthDayTime(check.at)}）：开始了批次 \`${check.started}\``
+        : `- 上次检查（${formatMonthDayTime(check.at)}）：没跑——${check.reason ?? check.block ?? '未知'}`,
     );
   }
   if (auto.ledger.consecutiveFailures > 0) lines.push(`- 自动整理连续失败：${auto.ledger.consecutiveFailures} 次`);
@@ -125,7 +126,7 @@ function externalLines(view: DreamStatusView): string[] {
     '- 课前学习（每轮先学这些外部库的新内容）：',
     ...view.external.map((item) => {
       const cursor = item.cursor
-        ? `学到 \`${item.cursor.commit.slice(0, 7)}\`（${formatTime(item.cursor.learnedAt)}）${item.cursor.pending ? `，还有 ${item.cursor.pending} 个文件待学` : ''}`
+        ? `学到 \`${item.cursor.commit.slice(0, 7)}\`（${formatMonthDayTime(item.cursor.learnedAt)}）${item.cursor.pending ? `，还有 ${item.cursor.pending} 个文件待学` : ''}`
         : '还没学过';
       return `  - ${item.label}：${cursor}`;
     }),
@@ -134,7 +135,7 @@ function externalLines(view: DreamStatusView): string[] {
 
 function runLine(run: DreamRun): string {
   const parts = [`\`${run.id}\` ${run.trigger === 'auto' ? '（自动）' : ''}${STATUS_LABEL[run.status]}`];
-  if (run.endedAt) parts.push(formatTime(run.endedAt));
+  if (run.endedAt) parts.push(formatMonthDayTime(run.endedAt));
   if (run.note) parts.push(run.note);
   const prs = run.targets.filter((target) => target.prUrl);
   if (prs.length > 0) parts.push(prs.map((target) => `[${target.label} #${target.prNumber ?? '?'}](${target.prUrl})`).join('、'));
@@ -151,8 +152,3 @@ function targetLine(target: DreamTarget): string {
   return `${target.label}：${PHASE_LABEL[target.phase]}${items}${link}${target.error ? `（${target.error}）` : ''}`;
 }
 
-function formatTime(at: number): string {
-  const d = new Date(at);
-  const pad = (n: number) => String(n).padStart(2, '0');
-  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
-}
