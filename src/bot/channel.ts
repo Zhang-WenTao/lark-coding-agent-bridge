@@ -76,6 +76,7 @@ import { claudeAccountPool } from '../agent/claude/accounts';
 import { autoEffortByline, startAutoEffort, type AutoEffortPick, type AutoEffortPlan } from './auto-effort-flow';
 import { overloadCard } from '../card/templates';
 import { botOwnersOf, BotOverloadGuard, isBotOnlyBatch, isOverloadExempt } from './bot-overload';
+import { fireAndForget } from '../core/fire-and-forget';
 import { log, redactDiagnosticText, reportMetric, withTrace } from '../core/logger';
 import { MediaCache, type LocalAttachment } from '../media/cache';
 import {
@@ -2507,9 +2508,13 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   };
   // The byline only shows on the final card, long after this lookup settles,
   // so resolve the paying account in the background instead of delaying the run.
-  void agentAccountName(controls.profileConfig).then((sponsor) => {
-    if (cardRenderOptions.meta) cardRenderOptions.meta.sponsor = sponsor;
-  });
+  fireAndForget(
+    agentAccountName(controls.profileConfig).then((sponsor) => {
+      if (cardRenderOptions.meta) cardRenderOptions.meta.sponsor = sponsor;
+    }),
+    'card',
+    { step: 'sponsor', scope },
+  );
 
   // This run's message, as a place results can be pointed to.
   const here: ResultLocation = {
@@ -2754,7 +2759,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       };
       const heartbeat = setInterval(() => {
         if (cardCtrl && latestState.terminal === 'running') {
-          void cardCtrl.update(renderLiveCard(latestState));
+          fireAndForget(cardCtrl.update(renderLiveCard(latestState)), 'card', { step: 'heartbeat', scope });
         }
       }, CARD_HEARTBEAT_MS);
       heartbeat.unref?.();
