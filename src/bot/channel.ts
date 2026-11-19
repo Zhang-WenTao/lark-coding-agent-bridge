@@ -54,7 +54,7 @@ import {
 } from '../card/run-state';
 import { renderText } from '../card/text-renderer';
 import { tryHandleCommand, type Controls } from '../commands';
-import type { AppConfig } from '../config/schema';
+import { parseNotifyTarget, type AppConfig } from '../config/schema';
 import {
   effortPrefForChat,
   getAgentStopGraceMs,
@@ -1017,8 +1017,9 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
         }
         if (repo.startsWith('skills:')) await skillLibraries?.sync(repo.slice('skills:'.length));
       },
-      notify: async (chatId, markdown) => {
-        await channel.send(chatId, { markdown });
+      notify: async (target, markdown) => {
+        const { chatId, replyTo } = parseNotifyTarget(target);
+        await channel.send(chatId, { markdown }, replyTo ? { replyTo, replyInThread: true } : undefined);
       },
     });
     await dream.init().catch((err: unknown) => log.fail('dream', err, { step: 'init' }));

@@ -499,7 +499,11 @@ export interface DreamTuning {
    * outcome goes to `notifyChat`.
    */
   afterAutoRun?: string[];
-  /** Chat (`oc_…`) or user (`ou_…`) told the outcome of every automatic run. Absent: automatic runs stay silent. */
+  /**
+   * Chat (`oc_…`) or user (`ou_…`) told the outcome of every automatic run;
+   * `oc_…/om_…` replies inside the topic that message starts, so a topic group
+   * keeps every notice in one thread. Absent: automatic runs stay silent.
+   */
   notifyChat?: string;
 }
 
@@ -842,6 +846,14 @@ function resolveSkillProjects(value: unknown): Record<string, string> {
   );
 }
 
+const NOTIFY_TARGET = /^(?:ou_[\w-]+|oc_[\w-]+(?:\/om_[\w-]+)?)$/;
+
+/** Splits a `notifyChat` value: `oc_…/om_…` → the chat plus the topic's first message to reply under. */
+export function parseNotifyTarget(target: string): { chatId: string; replyTo?: string } {
+  const [chatId = target, replyTo] = target.split('/');
+  return replyTo ? { chatId, replyTo } : { chatId };
+}
+
 /** {@link getDream}'s limits whether or not the switch is on — for status displays. */
 export function resolveDreamSettings(tuning: DreamTuning | undefined): DreamSettings {
   const raw = tuning ?? {};
@@ -855,7 +867,7 @@ export function resolveDreamSettings(tuning: DreamTuning | undefined): DreamSett
   const scopes = strings(raw.scopes);
   const daily = typeof raw.dailyAt === 'string' ? parseDreamClock(raw.dailyAt) : undefined;
   const resetBefore = typeof raw.quotaResetBefore === 'string' ? parseDreamClock(raw.quotaResetBefore) : undefined;
-  const notifyChat = typeof raw.notifyChat === 'string' && /^o[cu]_[\w-]+$/.test(raw.notifyChat.trim()) ? raw.notifyChat.trim() : '';
+  const notifyChat = typeof raw.notifyChat === 'string' && NOTIFY_TARGET.test(raw.notifyChat.trim()) ? raw.notifyChat.trim() : '';
   return {
     maxSessions: pick(raw.maxSessions, 1, 200, DREAM_DEFAULTS.maxSessions),
     maxInputChars: pick(raw.maxInputChars, 10_000, 1_000_000, DREAM_DEFAULTS.maxInputChars),

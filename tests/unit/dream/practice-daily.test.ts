@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { DREAM_AUTO_DEFAULTS, resolveDreamSettings, type DreamAutoSettings } from '../../../src/config/schema.js';
+import { DREAM_AUTO_DEFAULTS, parseNotifyTarget, resolveDreamSettings, type DreamAutoSettings } from '../../../src/config/schema.js';
 import { buildExternalLearningPrompt, OWN_SKILL_REF } from '../../../src/dream/prompt.js';
 import { hasArgumentHint, validateDreamProposals, type ValidateContext } from '../../../src/dream/proposal.js';
 import { changelogEntry } from '../../../src/dream/report.js';
@@ -49,6 +49,14 @@ describe('每日模式 settings', () => {
     expect(settings.auto.quotaWindow).toBe('any');
     expect(settings.notifyChat).toBeUndefined();
     expect(settings.external).toEqual([]);
+  });
+
+  it('takes a topic as the notify target and splits it for sending', () => {
+    expect(resolveDreamSettings({ notifyChat: ' oc_abc/om_def ' }).notifyChat).toBe('oc_abc/om_def');
+    expect(resolveDreamSettings({ notifyChat: 'ou_abc/om_def' }).notifyChat).toBeUndefined();
+    expect(resolveDreamSettings({ notifyChat: 'oc_abc/omt_def' }).notifyChat).toBeUndefined();
+    expect(parseNotifyTarget('oc_abc/om_def')).toEqual({ chatId: 'oc_abc', replyTo: 'om_def' });
+    expect(parseNotifyTarget('ou_abc')).toEqual({ chatId: 'ou_abc' });
   });
 
   it('wraps a late start past midnight', () => {
