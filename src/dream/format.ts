@@ -151,4 +151,3 @@ function targetLine(target: DreamTarget): string {
   const items = target.items > 0 ? `，${target.items} 项` : '';
   return `${target.label}：${PHASE_LABEL[target.phase]}${items}${link}${target.error ? `（${target.error}）` : ''}`;
 }
-
