@@ -1,4 +1,4 @@
-import { extractCodeBlocks } from './code-snippets';
+import { copyLang, extractCodeBlocks } from './code-snippets';
 import { deepMaskEmails } from './mask-email';
 import { runStrings, type Locale, type RunStrings } from './i18n';
 import { pauseNotice } from './pause-notice';
@@ -332,8 +332,9 @@ function stopButton(options: RunCardRenderOptions, t: RunStrings): object {
 /**
  * Feishu cards can't write the clipboard, and their code blocks have no copy
  * icon, so each code block gets a button: a click makes the bridge send that
- * block alone as a plain-text message, which long-press / right-click 复制
- * copies whole. The button carries only the snippet's key.
+ * block alone as a rich-text code block, whose copy icon copies it whole. The
+ * button carries only the snippet's key, plus the fence language when there
+ * is a usable one.
  */
 function copyButtons(state: RunState, copyCode: (code: string) => string, t: RunStrings): object[] {
   const text = state.blocks
@@ -351,11 +352,17 @@ function copyButtons(state: RunState, copyCode: (code: string) => string, t: Run
         text: { tag: 'plain_text', content: t.copyCode(blocks.length > 1 ? i + 1 : undefined, block.lang) },
         type: 'default',
         size: 'small',
-        behaviors: [{ type: 'callback', value: { cmd: `copycode.${copyCode(block.code)}` } }],
+        behaviors: [{ type: 'callback', value: { cmd: copyCmd(copyCode(block.code), block.lang) } }],
       },
     ],
   }));
   return [{ tag: 'column_set', flex_mode: 'flow', horizontal_spacing: '8px', columns }];
+}
+
+/** `cmd` of a copy button: `copycode.<key>`, plus `.<lang>` when the language is usable. */
+function copyCmd(key: string, lang: string): string {
+  const safe = copyLang(lang);
+  return safe ? `copycode.${key}.${safe}` : `copycode.${key}`;
 }
 
 function footerStatus(

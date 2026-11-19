@@ -168,7 +168,7 @@ import type { WorkspaceStore } from '../workspace/store';
 import { createBoundChat, defaultChatName } from '../bot/group';
 import { fetchKnownChats, type KnownChat } from '../bot/lark-info';
 import type { PendingRotationStore } from '../session/rotation-store';
-import type { CodeSnippetStore } from '../card/code-snippets';
+import { codeBlockPost, type CodeSnippetStore } from '../card/code-snippets';
 import { decideRotation } from '../session/smart-session';
 import { probeAgentSession } from '../agent/session-probe';
 import { describeMeetingError, type MeetingManager } from '../meeting/manager';
@@ -446,19 +446,23 @@ export async function runCommandHandler(
  */
 /**
  * 「复制代码」 button on a finished card: send that code block alone as a
- * plain-text reply to the card, so long-press / right-click 复制 takes it
- * whole. Cards themselves can't write the clipboard.
+ * reply to the card. It goes out as a rich-text code block, whose copy icon
+ * copies it whole (cards can't write the clipboard, and their own code blocks
+ * have no copy icon); code that itself holds a ``` fence goes out as plain
+ * text instead. Args: `<key> [lang]`; cards from before the language rode
+ * along carry only the key.
  */
 async function handleCopyCode(args: string, ctx: CommandContext): Promise<void> {
-  const key = args.trim();
+  const [key = '', lang = ''] = args.trim().split(/\s+/);
   const code = key ? ctx.controls.codeSnippets?.get(key) : undefined;
   if (!code) {
     await reply(ctx, '这段代码已经找不到了（太久以前的卡片），请让我重新发一次。');
     return;
   }
-  log.info('command', 'copycode', { key, chars: code.length });
+  const post = codeBlockPost(code, lang);
+  log.info('command', 'copycode', { key, chars: code.length, as: post ? 'code-block' : 'text' });
   try {
-    await ctx.channel.send(ctx.msg.chatId, { text: code }, commandReplyOptions(ctx));
+    await ctx.channel.send(ctx.msg.chatId, post ? { post } : { text: code }, commandReplyOptions(ctx));
   } catch (err) {
     log.fail('command', err, { step: 'copycode' });
     await reply(ctx, '代码发送失败，请稍后再点一次。');

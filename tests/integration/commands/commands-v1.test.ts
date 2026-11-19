@@ -546,6 +546,41 @@ describe('Bridge command contracts', () => {
   });
 });
 
+describe('/copycode', () => {
+  afterEach(async () => {
+    await Promise.all(cleanups.splice(0).map((cleanup) => cleanup()));
+  });
+
+  const SQL = "SELECT 1 AS a,\n       '$$' AS b;";
+  const snippets = new Map([
+    ['k-sql', SQL],
+    ['k-fence', '```js\nx()\n```'],
+  ]);
+  const withSnippets = (h: Harness): void => {
+    h.controls.codeSnippets = { get: (key: string) => snippets.get(key), put: () => '' };
+  };
+
+  it('sends the code as a rich-text code block, with the language when the button carries one', async () => {
+    const h = await createHarness();
+    withSnippets(h);
+    await expect(h.run('/copycode k-sql sql')).resolves.toBe(true);
+    expect(lastContent(h.channel)).toEqual({
+      post: { zh_cn: { title: '', content: [[{ tag: 'md', text: `\`\`\`sql\n${SQL}\n\`\`\`` }]] } },
+    });
+    await expect(h.run('/copycode k-sql')).resolves.toBe(true);
+    expect(JSON.stringify(lastContent(h.channel))).toContain('"```\\nSELECT');
+  });
+
+  it('falls back to plain text for code holding a fence, and says so when the code is gone', async () => {
+    const h = await createHarness();
+    withSnippets(h);
+    await expect(h.run('/copycode k-fence md')).resolves.toBe(true);
+    expect(lastContent(h.channel)).toEqual({ text: '```js\nx()\n```' });
+    await expect(h.run('/copycode k-missing')).resolves.toBe(true);
+    expect(lastMarkdown(h.channel)).toContain('找不到');
+  });
+});
+
 async function createHarness(): Promise<Harness> {
   const tmp = await createTmpProfile('commands-v1-');
   const channel = createFakeChannel();

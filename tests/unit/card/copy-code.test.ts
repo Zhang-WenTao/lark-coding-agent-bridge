@@ -3,7 +3,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import type { AgentEvent } from '../../../src/agent/types.js';
-import { CodeSnippetStore, extractCodeBlocks, snippetKey } from '../../../src/card/code-snippets.js';
+import {
+  CodeSnippetStore,
+  codeBlockPost,
+  copyLang,
+  extractCodeBlocks,
+  snippetKey,
+} from '../../../src/card/code-snippets.js';
 import { MAX_COPY_BUTTONS, renderCard } from '../../../src/card/run-renderer.js';
 import { initialState, reduce, type RunState } from '../../../src/card/run-state.js';
 
@@ -61,9 +67,17 @@ describe('copy buttons on the run card', () => {
     const card = renderCard(done, { copyCode: (code) => (kept.push(code), snippetKey(code)) });
     expect(kept).toEqual([SQL, 'ls -la']);
     expect(buttons(card)).toEqual([
-      ['📋 复制 #1 SQL', { cmd: `copycode.${snippetKey(SQL)}` }],
-      ['📋 复制 #2 BASH', { cmd: `copycode.${snippetKey('ls -la')}` }],
+      ['📋 复制 #1 SQL', { cmd: `copycode.${snippetKey(SQL)}.sql` }],
+      ['📋 复制 #2 BASH', { cmd: `copycode.${snippetKey('ls -la')}.bash` }],
     ]);
+  });
+
+  it('leaves the language off the button when it would not survive the cmd split', () => {
+    const odd = stateFrom([
+      { type: 'text', delta: '```file.ts\nx()\n```' },
+      { type: 'done', terminationReason: 'normal' },
+    ]);
+    expect(buttons(renderCard(odd, { copyCode: snippetKey }))[0]![1]).toEqual({ cmd: `copycode.${snippetKey('x()')}` });
   });
 
   it('labels a lone block without a number', () => {
@@ -92,6 +106,28 @@ describe('copy buttons on the run card', () => {
       { type: 'done', terminationReason: 'normal' },
     ]);
     expect(buttons(renderCard(state, { copyCode: snippetKey }))).toHaveLength(MAX_COPY_BUTTONS);
+  });
+});
+
+describe('codeBlockPost', () => {
+  it('wraps the code in one fenced md element, which Feishu shows as a code block with a copy icon', () => {
+    const code = "SELECT '$$ $& x' AS b;\n\n\n-- end";
+    expect(codeBlockPost(code, 'sql')).toEqual({
+      zh_cn: { title: '', content: [[{ tag: 'md', text: `\`\`\`sql\n${code}\n\`\`\`` }]] },
+    });
+  });
+
+  it('drops an unusable language and gives up on code holding a fence', () => {
+    expect(JSON.stringify(codeBlockPost('ls', 'a b'))).toContain('"```\\nls\\n```"');
+    expect(codeBlockPost('```js\nx()\n```', 'md')).toBeNull();
+  });
+
+  it('keeps only cmd-safe languages', () => {
+    expect(copyLang('sql')).toBe('sql');
+    expect(copyLang('c++')).toBe('c++');
+    expect(copyLang('file.ts')).toBe('');
+    expect(copyLang('')).toBe('');
+    expect(copyLang('x'.repeat(21))).toBe('');
   });
 });
 

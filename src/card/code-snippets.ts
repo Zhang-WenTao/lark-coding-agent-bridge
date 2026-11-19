@@ -41,6 +41,28 @@ export function snippetKey(code: string): string {
 }
 
 /**
+ * A fence's info string, made safe to ride in a card button's `cmd`
+ * (`copycode.<key>.<lang>`, split on dots): only letters, digits and `+#_-`,
+ * at most 20 characters; empty when nothing usable is left.
+ */
+export function copyLang(lang: string): string {
+  return /^[A-Za-z0-9+#_-]{1,20}$/.test(lang) ? lang : '';
+}
+
+/**
+ * `code` as a rich-text (post) message holding one fenced block. Feishu turns
+ * a fence inside a post's `md` element into a native code block, which —
+ * unlike a code block on a card — has a copy icon that copies it whole.
+ * Null when the code itself contains a ``` fence, which would close the
+ * block early; send it as plain text then.
+ */
+export function codeBlockPost(code: string, lang = ''): object | null {
+  if (code.includes('```')) return null;
+  const text = `\`\`\`${copyLang(lang)}\n${code}\n\`\`\``;
+  return { zh_cn: { title: '', content: [[{ tag: 'md', text }]] } };
+}
+
+/**
  * Code blocks from finished answers, kept so the card's 「复制代码」 button
  * can carry just a key: putting the code itself on the button would double
  * the card's size against Feishu's 30 KB limit. Oldest entries go first once
