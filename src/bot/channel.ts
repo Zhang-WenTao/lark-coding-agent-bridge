@@ -84,8 +84,9 @@ import {
 import { canRunAdminCommand, canUseDm, canUseGroup, isCreator, requireMentionForChat, runNeedsApproval } from '../policy/access';
 import {
   grantedToolsFor,
+  guestAccessInstruction,
+  guestRunGuard,
   isOwnerBatch,
-  ownerOnlyGuard,
   restrictedChatGuard,
   restrictedChatInstruction,
   restrictedChatWorkspace,
@@ -2087,8 +2088,30 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   } else if (backgroundOrigins.take(scope).length > 0) {
     log.info('run', 'background-origins-dropped', { scope });
   }
+  // Changes to the bridge and the agent itself are the owner's alone: other
+  // people's runs are told so and fenced off at the tool level.
+  const ownerRun = isOwnerBatch(controls, batch, (m) => senderTypeOf(m) === 'bot');
+  // Someone else's run may only touch what the owner opened to others.
+  const restrictedCwd = restrictedChat ? restrictedChatWorkspace(restrictedChat) : undefined;
+  const guestWorkspace = restrictedCwd ?? workspaces.cwdFor(scope) ?? controls.profileConfig.workspaces.default;
+  const guestGuard = ownerRun
+    ? undefined
+    : guestRunGuard(controls.profileConfig.access, {
+        larkChannelHome: paths.appDir,
+        grantedTools: grantedToolsFor(
+          controls.profileConfig.access.guestToolGrants,
+          batch,
+          (m) => senderTypeOf(m) === 'bot',
+        ),
+        ...(guestWorkspace ? { workspace: guestWorkspace } : {}),
+        chatId,
+      });
+  const runGuard = restrictedChat ? restrictedChatGuard(guestGuard, restrictedChat) : guestGuard;
+  // A guest run is told where it may look, so it does not guess its way into refusals.
+  const guestAccess = runGuard && guestGuard ? guestAccessInstruction(runGuard) : undefined;
   const instructions = [
     ...(restrictedChat ? [restrictedChatInstruction(restrictedChat)] : []),
+    ...(guestAccess ? [guestAccess] : []),
     ...(autoEffortPlan?.forcedLabel
       ? [
           `消息开头的「/${autoEffortPlan.forcedLabel}」是给 bridge 的档位指令，本轮已按这个档位运行；` +
@@ -2156,9 +2179,6 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       })
     : undefined;
 
-  // Changes to the bridge and the agent itself are the owner's alone: other
-  // people's runs are told so and fenced off at the tool level.
-  const ownerRun = isOwnerBatch(controls, batch, (m) => senderTypeOf(m) === 'bot');
   const prompt = buildPrompt(
     batch,
     attachments,
@@ -2204,26 +2224,6 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     ...(threadId ? { threadId } : {}),
   };
   const capability = agentCapability(controls.profileConfig);
-  // Someone else's run may only touch what the owner opened to others.
-  const restrictedCwd = restrictedChat ? restrictedChatWorkspace(restrictedChat) : undefined;
-  const guestWorkspace = restrictedCwd ?? workspaces.cwdFor(scope) ?? controls.profileConfig.workspaces.default;
-  const guestGuard = ownerRun
-    ? undefined
-    : ownerOnlyGuard({
-        larkChannelHome: paths.appDir,
-        guestRoots: controls.profileConfig.access.guestRoots ?? [],
-        guestReadOnlyRoots: controls.profileConfig.access.guestReadOnlyRoots ?? [],
-        deniedTools: controls.profileConfig.access.guestDeniedTools ?? [],
-        grantedTools: grantedToolsFor(
-          controls.profileConfig.access.guestToolGrants,
-          batch,
-          (m) => senderTypeOf(m) === 'bot',
-        ),
-        deniedCommands: controls.profileConfig.access.guestDeniedCommands ?? [],
-        ...(guestWorkspace ? { workspace: guestWorkspace } : {}),
-        chatId,
-      });
-  const runGuard = restrictedChat ? restrictedChatGuard(guestGuard, restrictedChat) : guestGuard;
   // Agents that post the answer as its own reply (see AgentDescriptor.finalReply)
   // treat the progress stream as best-effort: its failures are logged, not fatal.
   const separateFinalReply = capability.descriptor.finalReply === 'separate';

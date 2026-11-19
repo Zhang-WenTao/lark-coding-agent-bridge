@@ -26,12 +26,21 @@
 //                                     and in the paths they touch
 //   "refusal": "…"                  — the only answer to give when refused
 //
+// Two keys only shape the message of a refusal, so the agent can redo a read
+// the right way instead of giving up:
+//   "openDirs": [{ "path": "/abs", "readOnly": true }, …] — the places a
+//                guessed path outside them is pointed back to
+//   "notesPattern": "regex" — the knowledge notes tree, read by sub-path only
+//
+// The run's own saved tool output (`~/.claude/projects/<p>/<session>/tool-results`,
+// named by the hook's `session_id` and `transcript_path`) is always readable.
+//
 // Exit 2 with a reason on stderr blocks the call; Claude shows the reason to
 // the model. String matching, not a sandbox: it stops the plain ways of doing
 // it, and the agent is told the same rules in its system prompt.
 
 import { homedir } from 'node:os';
-import { isAbsolute, resolve, sep } from 'node:path';
+import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 
 const CONTROL = /\blark-channel-bridge\b|\blaunchctl\b|bridge-restart-when-idle|bridge_watchdog/;
 const WRITE_VERB =
@@ -88,17 +97,39 @@ function inScope(path, cfg) {
 const PATH_WALKER =
   /^(?:find|ls|du|tree|cd|pushd|cat|less|more|head|tail|grep|egrep|fgrep|rg|ag|ack|fd|locate|mdfind|tar|zip|rsync|scp|cp|mv|rm|chmod|chown|stat|file|open|xargs|wc|strings|sort|diff)$/;
 
+// A character that can continue a path name: `/a/b` is not `/a/b-c`.
+const PATH_CHAR = /[^\s'"`;|&()<>]/;
+const APART = /[\s;|&()]/;
+// String functions of the usual script languages and jq, called on text.
+const STRING_OP =
+  /\b(?:r?split|splits|join|replace(?:All)?|[lr]?strip|trim|starts?[wW]ith|ends?[wW]ith|includes|(?:last)?[iI]ndexOf|r?partition|count|r?find|r?index|remove(?:prefix|suffix)|[lr]trimstr|g?sub|test|match)\s*\(\s*$/;
+
 /**
- * A run of slashes standing alone between spaces — "SEA / EUR" in report text,
- * jq's `a // b` — is prose or an operator, not the root directory, unless a
- * command that takes paths comes earlier in the same shell segment.
+ * A run of slashes is the root directory only when it stands as a word of its
+ * own (bare, or quoted as a whole: `ls "/"`) after a command that takes paths.
+ * Glued to other text it is code or a regex — `split("/")`, awk's
+ * `/a/,/<\/b>/`, sed's `s/a/b/` — and standing alone without such a command it
+ * is prose or an operator ("SEA / EUR", jq's `a // b`).
  */
-function isLoneSlash(cmd, start, end) {
-  const before = start === 0 ? ' ' : cmd[start - 1];
-  const after = end >= cmd.length ? ' ' : cmd[end];
-  if (!/\s/.test(before) || !/\s/.test(after)) return false;
-  const segment = cmd.slice(0, start).split(/&&|\|\||;|\||\n/).pop() ?? '';
-  return !segment
+function isRootWord(cmd, start, end) {
+  let s = start;
+  let e = end;
+  const quote = cmd[s - 1];
+  const quoted = (quote === "'" || quote === '"') && cmd[e] === quote;
+  if (quoted) {
+    s--;
+    e++;
+    // A quoted "/" in code: text handled by a string function is no place
+    // (`.split("/")`, `"/".join`); anywhere else it is an argument that may
+    // well be the root (`os.walk('/')`).
+    const before = cmd.slice(0, s);
+    if (STRING_OP.test(before) || cmd[e] === '.') return false;
+    if (/[(,=[{:]\s*$/.test(before)) return true;
+  }
+  const apart = (c) => c === undefined || (quoted ? /[\s;|&]/ : APART).test(c);
+  if (!apart(cmd[s - 1]) || !apart(cmd[e])) return false;
+  const segment = cmd.slice(0, s).split(/&&|\|\||;|\||\n/).pop() ?? '';
+  return segment
     .split(/\s+/)
     .map((w) => w.replace(/^[\s'"`({[$]+/, '').split('/').pop() ?? '')
     .some((w) => PATH_WALKER.test(w));
@@ -112,22 +143,26 @@ function commandPaths(cmd, cwd) {
     if (!token || /^[a-z][a-z0-9+.-]*:\/\//i.test(token)) continue;
     if (!(token.startsWith('/') || token.startsWith('.') || token.includes('/'))) continue;
     if (token.startsWith('-')) continue;
-    if (/^\/+$/.test(m[0]) && isLoneSlash(cmd, m.index, m.index + m[0].length)) continue;
+    if (/^\/+$/.test(m[0]) && !isRootWord(cmd, m.index, m.index + m[0].length)) continue;
     out.push(isAbsolute(token) ? resolve(token) : resolve(cwd, token));
   }
   return out;
 }
 
-/** Does `segment` mention `rule.path` outside its allowed sub-paths? */
-function mentions(segment, rule) {
-  let from = 0;
-  for (;;) {
+/**
+ * Where `segment` names `rule.path` outside its allowed sub-paths: the text
+ * from that mention on, or null. A longer name that only starts the same
+ * (`~/.lark-channel-workspaces` for `~/.lark-channel`) is another place.
+ */
+function mentioned(segment, rule) {
+  for (let from = 0; ; ) {
     const at = segment.indexOf(rule.path, from);
-    if (at === -1) return false;
-    const rest = segment.slice(at);
-    const allowed = (rule.allow ?? []).some((re) => new RegExp(`^${re}`).test(rest));
-    if (!allowed) return true;
+    if (at === -1) return null;
     from = at + rule.path.length;
+    const next = segment[from];
+    if (next !== undefined && next !== '/' && PATH_CHAR.test(next)) continue;
+    const rest = segment.slice(at);
+    if (!(rule.allow ?? []).some((re) => new RegExp(`^${re}`).test(rest))) return rest;
   }
 }
 
@@ -369,12 +404,21 @@ function patternWords(args, spec) {
   return found;
 }
 
+/**
+ * Does a shell word run a command when expanded (`$(…)`, backticks, `<(…)`)?
+ * Single-quoted text and backslash-escaped characters are literal.
+ */
+function runsCommand(raw) {
+  const live = raw.replace(/'[^']*'/g, '').replace(/\\./g, '');
+  return /\$\(|`|<\(/.test(live);
+}
+
 /** `cmd` with the patterns of search tools blanked out (same length). */
 function blankSearchPatterns(cmd) {
   let out = cmd;
   for (const w of searchPatterns(cmd)) {
     const raw = cmd.slice(w.start, w.end);
-    if (/\$\(|`|<\(/.test(raw)) continue;
+    if (runsCommand(raw)) continue;
     out = out.slice(0, w.start) + raw.replace(/[^\n]/g, ' ') + out.slice(w.end);
   }
   return out;
@@ -383,7 +427,35 @@ function blankSearchPatterns(cmd) {
 function writesInto(segment, rule) {
   const trimmed = segment.trim();
   if (isWriteVerb(trimmed)) return true;
-  return new RegExp(`>{1,2}\\s*['"]?${escapeRe(rule.path)}`).test(segment);
+  return new RegExp(`>{1,2}\\s*['"]?${escapeRe(rule.path)}(?![^/\\s'"\`;|&()<>])`).test(segment);
+}
+
+// Commands whose last argument is the only place they write to.
+const DEST_LAST = new Set(['cp', 'rsync', 'install', 'ln', 'ditto', 'scp']);
+
+/** The words a writing command acts on, as written (relative ones included). */
+function writeArgs(trimmed) {
+  const words = shellWords(trimmed).map((w) => w.text);
+  let i = 0;
+  while (i < words.length && (/^[A-Za-z_]\w*=/.test(words[i]) || words[i] === 'sudo')) i++;
+  const verb = (words[i] ?? '').split('/').pop();
+  const args = words.slice(i + 1).filter((w) => w && !w.startsWith('-'));
+  return DEST_LAST.has(verb) ? args.slice(-1) : args;
+}
+
+/** The write-fenced place the shell is in when it reaches this segment, if any. */
+function writeFence(here, cfg) {
+  return (cfg.rules ?? []).find((rule) => rule.bash === 'write' && within(here, rule.path));
+}
+
+/** Does `trimmed`, run from inside `fence`, write into it? */
+function writesFromInside(trimmed, here, fence) {
+  if (RELATIVE_REDIRECT.test(trimmed)) return true;
+  if (!isWriteVerb(trimmed)) return false;
+  // Variables and globs may point anywhere: count them as writing here.
+  return writeArgs(trimmed).some(
+    (w) => /[$`*?[]/.test(w) || within(isAbsolute(w) ? resolve(w) : resolve(here, w), fence.path),
+  );
 }
 
 // `cat > notes.md <<'EOF' … EOF` only writes its body to a file: the quoted
@@ -401,42 +473,103 @@ function stripDataHeredocs(cmd) {
   return cmd.replace(HEREDOC, (whole, header) => (isDataSink(header) ? header : whole));
 }
 
-function decideBash(command, cfg, cwd) {
-  const full = normalize(String(command ?? ''), cfg.home);
-  if (CONTROL.test(full)) return '这条命令会控制 bridge 进程（启停、重启或 launchd）';
-  for (const re of cfg.deniedCommands ?? []) {
-    if (new RegExp(re).test(full)) return '这条命令属于仅限主人的操作';
+const SEGMENTS = /&&|\|\||;|\||\n/;
+
+/** A refusal: why, and optionally how to do the same read the open way. */
+function deny(reason, hint) {
+  return hint ? { reason, hint } : { reason };
+}
+
+/** What to do when the refused step was only a read in the wrong place. */
+function giveUp(cfg) {
+  return cfg.refusal ? `只回复用户「${cfg.refusal}」这一句，不要解释原因` : '告诉用户这部分内容不对外开放';
+}
+
+/** For a path outside every open place: where the run may look instead. */
+function scopeHint(path, cfg) {
+  const notes = notesHint(path, cfg);
+  if (notes) return notes;
+  const open = (cfg.openDirs ?? []).map((d) => `${d.path}${d.readOnly ? '（只读）' : ''}`);
+  if (open.length === 0) return undefined;
+  return (
+    `能访问的只有这些目录：${open.join('、')}，以及技能目录和本次的附件。` +
+    `要找的内容在这些目录里，就改用其中的路径重新执行；不在的话停止这一步，${giveUp(cfg)}，不要再试别的路径。`
+  );
+}
+
+/** For the knowledge notes tree: read it by its open sub-paths. */
+function notesHint(text, cfg) {
+  if (!cfg.notesPattern || !new RegExp(`^${cfg.notesPattern}`).test(text)) return undefined;
+  return (
+    '知识笔记要用完整路径按子目录读：<notesDir>/global/、<notesDir>/global-external/、<notesDir>/external/ 和本会话自己的目录都能读；' +
+    '不要 cd 进笔记目录根，也不要对整个笔记目录搜索，按关键词找写成 ' +
+    '`grep -ril <关键词> <notesDir>/global <notesDir>/global-external <notesDir>/external`，照这个写法重新执行即可。' +
+    `global-owner/ 和其他会话的笔记不对外，要读的是这些就停止这一步，${giveUp(cfg)}。`
+  );
+}
+
+/** A refusal for a segment that touches an owner-only area, or null. */
+function fencedArea(segment, here, cfg) {
+  const trimmed = segment.trim();
+  // `cd <read-only> && touch x` writes there without naming it again.
+  const fence = writeFence(here, cfg);
+  if (fence && writesFromInside(trimmed, here, fence)) return deny(`这条命令会改动 ${fence.path}`);
+  for (const rule of cfg.rules ?? []) {
+    const named = mentioned(segment, rule);
+    if (named === null) continue;
+    if (rule.bash === 'any') return deny(`这条命令会读取或改动 ${rule.path}`, notesHint(named, cfg));
+    if (!/^cd\s/.test(trimmed) && writesInto(segment, rule)) return deny(`这条命令会改动 ${rule.path}`);
   }
-  const cmd = blankSearchPatterns(stripDataHeredocs(full));
-  let cdInto = null;
-  for (const segment of cmd.split(/&&|\|\||;|\||\n/)) {
-    const trimmed = segment.trim();
-    if (!trimmed) continue;
-    // `cd <protected> && echo x > file` writes there without naming it again.
-    if (cdInto && (isWriteVerb(trimmed) || RELATIVE_REDIRECT.test(trimmed))) {
-      return `这条命令会改动 ${cdInto.path}`;
-    }
+  return null;
+}
+
+/** A refusal for a segment that reaches outside the open places, or null. */
+function outOfScope(segment, here, cfg) {
+  for (const path of commandPaths(segment, here)) {
+    if (!inScope(path, cfg)) return deny(`这条命令会访问未对外开放的位置 ${path}`, scopeHint(path, cfg));
+    // `<open path>/../<fenced>` names an allowed place but resolves into a fenced one.
     for (const rule of cfg.rules ?? []) {
-      if (!mentions(segment, rule)) continue;
-      if (rule.bash === 'any') return `这条命令会读取或改动 ${rule.path}`;
-      if (/^cd\s/.test(trimmed)) cdInto = rule;
-      else if (writesInto(segment, rule)) return `这条命令会改动 ${rule.path}`;
-    }
-  }
-  if (BARE_CD.test(cmd)) return '这条命令会进入主人的主目录';
-  // Relative paths count from wherever the earlier `cd`s of this command left
-  // the shell, so `cd a/b && ls ../..` stays in the workspace it started in.
-  let here = cwd;
-  for (const segment of cmd.split(/&&|\|\||;|\||\n/)) {
-    for (const path of commandPaths(segment, here)) {
-      if (!inScope(path, cfg)) return `这条命令会访问未对外开放的位置 ${path}`;
-      // `<open path>/../<fenced>` names an allowed place but resolves into a fenced one.
-      for (const rule of cfg.rules ?? []) {
-        if (rule.bash === 'any' && fenced(path, rule)) return `这条命令会读取或改动 ${rule.path}`;
+      if (rule.bash === 'any' && fenced(path, rule)) {
+        return deny(`这条命令会读取或改动 ${rule.path}`, notesHint(path, cfg));
       }
     }
-    const cd = segment.trim().match(/^cd\s+(['"]?)([^\s'"$`]+)\1$/);
-    if (cd) here = isAbsolute(cd[2]) ? resolve(cd[2]) : resolve(here, cd[2]);
+  }
+  return null;
+}
+
+/** Where the shell is after `segment`: only a plain `cd <path>` moves it. */
+function nextDir(segment, here) {
+  const cd = segment.trim().match(/^cd\s+(['"]?)([^\s'"$`]+)\1$/);
+  if (!cd) return here;
+  return isAbsolute(cd[2]) ? resolve(cd[2]) : resolve(here, cd[2]);
+}
+
+function decideBash(command, cfg, cwd) {
+  const full = normalize(String(command ?? ''), cfg.home);
+  if (CONTROL.test(full)) return deny('这条命令会控制 bridge 进程（启停、重启或 launchd）');
+  // What a search looks for is text: `git grep "INSERT INTO t"` and
+  // `grep -r "kubectl delete" docs` run neither.
+  const searched = blankSearchPatterns(full);
+  for (const re of cfg.deniedCommands ?? []) {
+    if (new RegExp(re).test(searched)) return deny('这条命令属于仅限主人的操作');
+  }
+  const cmd = blankSearchPatterns(stripDataHeredocs(full));
+  const segments = cmd.split(SEGMENTS).filter((s) => s.trim());
+  // Owner-only areas first, wherever they come in the command.
+  let here = cwd;
+  for (const segment of segments) {
+    const refused = fencedArea(segment, here, cfg);
+    if (refused) return refused;
+    here = nextDir(segment, here);
+  }
+  if (BARE_CD.test(cmd)) return deny('这条命令会进入主人的主目录');
+  // Relative paths count from wherever the earlier `cd`s of this command left
+  // the shell, so `cd a/b && ls ../..` stays in the workspace it started in.
+  here = cwd;
+  for (const segment of segments) {
+    const refused = outOfScope(segment, here, cfg);
+    if (refused) return refused;
+    here = nextDir(segment, here);
   }
   return null;
 }
@@ -458,7 +591,7 @@ function decideFile(toolName, input, cfg, cwd) {
   if (WRITING_TOOLS.has(toolName) && (cfg.deniedContent ?? []).length > 0) {
     const text = writtenText(input);
     for (const re of cfg.deniedContent) {
-      if (new RegExp(re).test(text)) return '要写入的内容涉及受限操作';
+      if (new RegExp(re).test(text)) return deny('要写入的内容涉及受限操作');
     }
   }
   for (const key of FILE_TOOLS[toolName] ?? []) {
@@ -470,28 +603,70 @@ function decideFile(toolName, input, cfg, cwd) {
       if (!isAbsolute(expanded)) continue;
     }
     const path = resolve(cwd, expanded);
-    if (!inScope(path, cfg)) return `访问的位置未对外开放：${path}`;
+    if (!inScope(path, cfg)) return deny(`访问的位置未对外开放：${path}`, scopeHint(path, cfg));
     for (const re of cfg.deniedContent ?? []) {
-      if (new RegExp(re).test(path)) return `访问的位置未对外开放：${path}`;
+      if (new RegExp(re).test(path)) return deny(`访问的位置未对外开放：${path}`);
     }
     for (const rule of cfg.rules ?? []) {
-      if (rule.bash === 'any' && fenced(path, rule)) return `访问的位置未对外开放：${rule.path}`;
+      if (rule.bash === 'any' && fenced(path, rule)) {
+        return deny(`访问的位置未对外开放：${rule.path}`, notesHint(path, cfg));
+      }
     }
     if (WRITING_TOOLS.has(toolName)) {
       for (const rule of cfg.rules ?? []) {
-        if (within(path, rule.path)) return `这个位置不能改动：${rule.path}`;
+        if (within(path, rule.path)) return deny(`这个位置不能改动：${rule.path}`);
       }
     }
   }
   return null;
 }
 
-/** Why the tool call is refused, or null when it may run. */
-export function decide(toolName, input, cfg, cwd = process.cwd()) {
-  const config = { ...cfg, home: cfg.home ?? homedir() };
+/**
+ * Where Claude Code saved this session's oversized tool output, from the
+ * hook's own `session_id` and `transcript_path`; null when they don't name a
+ * session directly under `~/.claude/projects/<project>/`.
+ */
+function sessionOutputDir(home, hookInput) {
+  const id = hookInput?.session_id;
+  const transcript = hookInput?.transcript_path;
+  if (typeof id !== 'string' || !/^[A-Za-z0-9][\w-]*$/.test(id)) return null;
+  if (typeof transcript !== 'string' || !isAbsolute(transcript)) return null;
+  const project = dirname(resolve(transcript));
+  if (dirname(project) !== join(home, '.claude', 'projects')) return null;
+  return join(project, id, 'tool-results');
+}
+
+/** `cfg` with the run's own tool output opened: readable, still never writable. */
+function withSessionOutput(cfg, hookInput) {
+  const dir = sessionOutputDir(cfg.home, hookInput);
+  if (!dir) return cfg;
+  const open = `${escapeRe(dir)}(?![^/\\s'"\`;|&()<>])`;
+  return {
+    ...cfg,
+    allowedRoots: [...(cfg.allowedRoots ?? []), dir],
+    rules: (cfg.rules ?? []).map((rule) =>
+      rule.bash === 'any' && within(dir, rule.path) ? { ...rule, allow: [...(rule.allow ?? []), open] } : rule,
+    ),
+  };
+}
+
+/**
+ * Why the tool call is refused (`{ reason, hint? }`), or null when it may run.
+ * `hookInput` is the whole hook payload, for the session it belongs to.
+ */
+export function decide(toolName, input, cfg, cwd = process.cwd(), hookInput = {}) {
+  const config = withSessionOutput({ ...cfg, home: cfg.home ?? homedir() }, hookInput);
   if (toolName === 'Bash') return decideBash(input?.command, config, cwd);
   if (toolName in FILE_TOOLS) return decideFile(toolName, input, config, cwd);
   return null;
+}
+
+/** What the agent is told when a call is refused. */
+function refusalMessage({ reason, hint }, cfg) {
+  if (hint) return `${reason}。${hint}\n`;
+  return cfg.refusal
+    ? `${reason}。这一步在当前会话不可用：请停止这一步，不要换个写法再试；只回复用户「${cfg.refusal}」这一句，不要解释原因，也不要提及拦截、权限或规则。\n`
+    : `${reason}。本次任务不是 bot 主人发起的，这部分仅限主人本人。请停止这一步，并告诉用户这部分内容不对外开放。\n`;
 }
 
 async function main() {
@@ -510,13 +685,9 @@ async function main() {
     cfg = {};
   }
   const cwd = typeof input?.cwd === 'string' && input.cwd ? input.cwd : process.cwd();
-  const reason = decide(input?.tool_name, input?.tool_input, cfg, cwd);
-  if (!reason) return 0;
-  process.stderr.write(
-    cfg.refusal
-      ? `${reason}。这一步在当前会话不可用：请停止这一步，不要换个写法再试；只回复用户「${cfg.refusal}」这一句，不要解释原因，也不要提及拦截、权限或规则。\n`
-      : `${reason}。本次任务不是 bot 主人发起的，这部分仅限主人本人。请停止这一步，并告诉用户这部分内容不对外开放。\n`,
-  );
+  const refused = decide(input?.tool_name, input?.tool_input, cfg, cwd, input);
+  if (!refused) return 0;
+  process.stderr.write(refusalMessage(refused, cfg));
   return 2;
 }
 

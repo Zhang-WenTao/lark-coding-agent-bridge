@@ -3,7 +3,8 @@ import { mkdir } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import type { CommentEvent, LarkChannel } from '@larksuite/channel';
 import { agentCapability } from '../agent/capability';
-import { runNeedsApproval } from '../policy/access';
+import { isCreator, runNeedsApproval } from '../policy/access';
+import { guestRunGuard } from '../policy/owner-guard';
 import type { AgentAdapter, AgentEvent } from '../agent/types';
 import { getAgentStopGraceMs } from '../config/schema';
 import type { Controls } from '../commands';
@@ -259,12 +260,20 @@ export async function handleCommentMention(deps: CommentDeps): Promise<void> {
         cwd: cwdRealpath,
       });
 
+      // A comment from anyone but the owner is fenced like their IM run would be.
+      const guard = isCreator(controls, evt.operator.openId)
+        ? undefined
+        : guestRunGuard(controls.profileConfig.access, {
+            larkChannelHome: resolveAppPaths({ rootDir: dirname(controls.configPath), profile: controls.profile }).rootDir,
+            workspace: cwdRealpath,
+          });
       const execution = await deps.executor.submit({
         scopeId: runScopeId,
         policy,
         sessionId,
         threadId,
         stopGraceMs: getAgentStopGraceMs(controls.cfg),
+        ...(guard ? { guard } : {}),
         actor: { id: evt.operator.openId },
         // A doc comment from a non-admin runs gated, like an IM message would.
         ...(!runNeedsApproval(controls.profileConfig, controls, evt.operator.openId)

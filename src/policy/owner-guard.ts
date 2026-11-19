@@ -3,7 +3,7 @@ import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { NormalizedMessage } from '@larksuite/channel';
-import type { RestrictedChat } from '../config/profile-schema';
+import type { ProfileAccess, RestrictedChat } from '../config/profile-schema';
 import { isCreator, type RuntimeControls } from './access';
 
 /** What a restricted chat answers when a step is refused (`access.restrictedChats`). */
@@ -51,7 +51,23 @@ export interface RunGuard {
   refusal?: string;
   /** The PreToolUse hook script that applies the guard to tool calls. */
   hookScript: string;
+  /**
+   * The places opened to the run, named in a refusal so a guessed path can be
+   * redone in the right place. Only shapes the message; the fences are above.
+   */
+  openDirs?: OpenDir[];
+  /** Regex (anchored) for the knowledge notes tree, read by sub-path only. */
+  notesPattern?: string;
 }
+
+/** One place opened to a guest run, as told to the agent. */
+export interface OpenDir {
+  path: string;
+  readOnly: boolean;
+}
+
+/** After a path: the next character does not continue its name. */
+const NAME_END = `(?![^/\\s'"\`;|&()<>])`;
 
 const PACKAGE_NAME = 'lark-channel-bridge';
 
@@ -86,7 +102,7 @@ function escapeRe(s: string): string {
 function carveReadOnly(rule: GuardRule, readOnly: readonly string[]): GuardRule {
   if (rule.bash !== 'any') return rule;
   const inside = (p: string): boolean => p === rule.path || p.startsWith(`${rule.path}/`);
-  const open = readOnly.filter(inside).map((p) => `${escapeRe(p)}(?![^/\\s'"\`;|&()<>])`);
+  const open = readOnly.filter(inside).map((p) => `${escapeRe(p)}${NAME_END}`);
   return open.length > 0 ? { ...rule, allow: [...(rule.allow ?? []), ...open] } : rule;
 }
 
@@ -117,15 +133,17 @@ export function ownerOnlyGuard(opts: {
   const expand = (p: string): string => (p === '~' ? home : p.startsWith('~/') ? join(home, p.slice(2)) : p);
   const readOnlyRoots = (opts.guestReadOnlyRoots ?? []).map(expand);
   const media = `${escapeRe(lc)}/profiles/[^/]+/media/`;
+  const notesRoot = `${escapeRe(lc)}/profiles/[^/]+/knowledge/notes`;
   // The knowledge notes the bridge points every chat at: the shared layers and
   // this chat's own (topics included). The owner's layer and other chats' stay closed.
-  const notes = `${escapeRe(lc)}/profiles/[^/]+/knowledge/notes/(?:global|global-external|external${
+  const notes = `${notesRoot}/(?:global|global-external|external${
     opts.chatId ? `|${escapeRe(opts.chatId)}(?:_[^/\\s'"\`;|&()<>]+)?` : ''
-  })/`;
+  })${NAME_END}`;
+  const guestRoots = (opts.guestRoots ?? []).map(expand);
   return {
     home,
     allowedRoots: [
-      ...(opts.guestRoots ?? []).map(expand),
+      ...guestRoots,
       // Readable like an opened project; the `write` rules below fence edits.
       ...readOnlyRoots,
       ...(opts.workspace ? [opts.workspace] : []),
@@ -161,7 +179,40 @@ export function ownerOnlyGuard(opts: {
     deniedTools: (opts.deniedTools ?? []).filter((t) => !(opts.grantedTools ?? []).includes(t)),
     deniedCommands: (opts.deniedCommands ?? []).filter((re) => !(opts.grantedTools ?? []).includes(re)),
     hookScript: join(root, 'bin', 'bridge-guard.mjs'),
+    openDirs: [
+      ...guestRoots.map((path) => ({ path, readOnly: false })),
+      ...readOnlyRoots.map((path) => ({ path, readOnly: true })),
+      ...(opts.workspace ? [{ path: opts.workspace, readOnly: false }] : []),
+    ],
+    notesPattern: `${notesRoot}${NAME_END}`,
   };
+}
+
+/**
+ * The guard for a run someone other than the owner started, from the
+ * profile's `access` settings. Every entry point that runs the agent for
+ * another person (IM messages, doc comments) builds it here, so none of them
+ * can forget a setting.
+ */
+export function guestRunGuard(
+  access: Pick<ProfileAccess, 'guestRoots' | 'guestReadOnlyRoots' | 'guestDeniedTools' | 'guestDeniedCommands'>,
+  opts: {
+    larkChannelHome: string;
+    grantedTools?: readonly string[];
+    workspace?: string;
+    chatId?: string;
+  },
+): RunGuard {
+  return ownerOnlyGuard({
+    larkChannelHome: opts.larkChannelHome,
+    guestRoots: access.guestRoots ?? [],
+    guestReadOnlyRoots: access.guestReadOnlyRoots ?? [],
+    deniedTools: access.guestDeniedTools ?? [],
+    grantedTools: opts.grantedTools ?? [],
+    deniedCommands: access.guestDeniedCommands ?? [],
+    ...(opts.workspace ? { workspace: opts.workspace } : {}),
+    ...(opts.chatId ? { chatId: opts.chatId } : {}),
+  });
 }
 
 /**
@@ -193,6 +244,9 @@ export function restrictedChatGuard(
   // named, and Claude's own Read deny is dropped for the trees holding one.
   const carve = (rule: GuardRule): GuardRule => carveReadOnly(rule, readOnly);
   const holdsReadOnly = (p: string): boolean => readOnly.some((r) => inside(r, p));
+  const readOnlyHere = (p: string): boolean => readOnly.some((r) => inside(p, r));
+  const fencedHere = (p: string): boolean => paths.some((d) => inside(p, d)) && !readOnlyHere(p);
+  const baseOpen = (base.openDirs ?? []).filter((d) => !fencedHere(d.path));
   return {
     ...base,
     rules: [
@@ -209,7 +263,37 @@ export function restrictedChatGuard(
     ],
     deniedContent: [...(base.deniedContent ?? []), ...chat.deniedCommands],
     refusal: chat.refusal ?? DEFAULT_RESTRICTED_REFUSAL,
+    ...(guard
+      ? {
+          openDirs: [
+            ...baseOpen.map((d) => (readOnlyHere(d.path) ? { ...d, readOnly: true } : d)),
+            ...readOnly.filter((p) => !baseOpen.some((d) => d.path === p)).map((path) => ({ path, readOnly: true })),
+          ],
+        }
+      : {}),
   };
+}
+
+/**
+ * What a guest run is told about where it may look; the guard enforces the
+ * same. Without it agents guess at paths and walk into refusals.
+ */
+export function guestAccessInstruction(guard: RunGuard): string | undefined {
+  const dirs = guard.openDirs ?? [];
+  if (dirs.length === 0) return undefined;
+  const home = guard.home;
+  const show = (p: string): string => (p.startsWith(`${home}/`) ? `~/${p.slice(home.length + 1)}` : p);
+  const rw = dirs.filter((d) => !d.readOnly).map((d) => show(d.path));
+  const ro = dirs.filter((d) => d.readOnly).map((d) => show(d.path));
+  return [
+    '本轮不是 bot 主人发起的。主人主目录下能访问的只有下面这些位置，找代码和文件先在这里找，不要去列主目录或别的目录猜位置：',
+    ...(rw.length > 0 ? [`- 可读写：${rw.join('、')}`] : []),
+    ...(ro.length > 0 ? [`- 只读（可以读、搜索、用 git 看历史，不能改动、不能 pull 或切分支）：${ro.join('、')}`] : []),
+    '- 另外还有技能目录、本次的附件，以及本会话自己保存的工具输出。',
+    '知识笔记用 `<notesDir>/<笔记名>.md` 的完整路径读；按关键词找写成 ' +
+      '`grep -ril <关键词> <notesDir>/global <notesDir>/global-external <notesDir>/external`。' +
+      '不要 cd 进 notesDir 根目录，也不要对它整体搜索：global-owner/ 和其他会话的笔记不对外。',
+  ].join('\n');
 }
 
 /** The working directory a restricted chat pins, `~` expanded. */
@@ -302,12 +386,13 @@ export function claudeGuardArgs(
         deniedCommands: guard.deniedCommands,
         ...(guard.deniedContent?.length ? { deniedContent: guard.deniedContent } : {}),
         ...(guard.refusal ? { refusal: guard.refusal } : {}),
+        ...(guard.openDirs?.length ? { openDirs: guard.openDirs } : {}),
+        ...(guard.notesPattern ? { notesPattern: guard.notesPattern } : {}),
       }),
     },
   };
 }
 
-/** Every message of the batch came from the bot owner themselves (not a bot). */
 /**
  * Tools and commands lifted for a guest run (`access.guestToolGrants`): only
  * those every sender in the batch was granted. A bot in the batch gets nothing.
@@ -322,6 +407,7 @@ export function grantedToolsFor(
   return [...new Set(first)].filter((tool) => rest.every((tools) => tools.includes(tool)));
 }
 
+/** Every message of the batch came from the bot owner themselves (not a bot). */
 export function isOwnerBatch(
   controls: RuntimeControls,
   batch: readonly NormalizedMessage[],

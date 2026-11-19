@@ -52,6 +52,27 @@ describe('comment guard', () => {
     expect(h.channel.replies).toEqual(['answer']);
   });
 
+  it('fences a comment run started by someone other than the owner', async () => {
+    const h = await createHarness({ comments: {}, allowedUsers: [] });
+
+    await handleCommentMention(h.deps(event({ operator: { openId: 'ou-outsider' } })));
+
+    expect(h.agent.runOptions).toHaveLength(1);
+    const guard = h.agent.runOptions[0]!.guard;
+    expect(guard?.readDeny.length).toBeGreaterThan(0);
+    // The run's own workspace stays open to it.
+    expect(guard?.openDirs?.some((d) => !d.readOnly)).toBe(true);
+  });
+
+  it('leaves the owner\'s own comment run unfenced', async () => {
+    const h = await createHarness({ comments: {}, allowedUsers: [] });
+
+    await handleCommentMention(h.deps(event({ operator: { openId: 'ou-owner' } })));
+
+    expect(h.agent.runOptions).toHaveLength(1);
+    expect(h.agent.runOptions[0]!.guard).toBeUndefined();
+  });
+
   it('skips unmentioned, unsupported, and self-reply comments before remote fetch', async () => {
     const h = await createHarness({
       botOpenId: 'ou-bot',
