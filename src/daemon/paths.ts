@@ -41,8 +41,6 @@ export function serviceNameForProfile(profile: string = paths.profile): string {
 
 // === macOS launchd ===
 
-export const LAUNCH_AGENT_LABEL = launchAgentLabel();
-
 export function launchAgentLabel(profile: string = paths.profile): string {
   return `ai.${serviceNameForProfile(profile)}`;
 }
@@ -56,8 +54,6 @@ export function launchAgentPlistPath(profile: string = paths.profile): string {
 }
 
 // === Linux systemd (user units) ===
-
-export const SYSTEMD_UNIT_NAME = systemdUnitName();
 
 export function systemdUnitName(profile: string = paths.profile): string {
   return `${serviceNameForProfile(profile)}.service`;
@@ -80,8 +76,6 @@ export function systemdUnitPath(profile: string = paths.profile): string {
  * `LarkChannelBridge\Bot` would create a Bot task under a LarkChannelBridge
  * folder. We keep it flat for now.
  */
-export const WINDOWS_TASK_NAME = windowsTaskName();
-
 export function windowsTaskName(profile: string = paths.profile): string {
   return `LarkChannelBridge.Bot.${serviceProfileId(profile)}`;
 }

@@ -705,32 +705,6 @@ function redactResourceText(text: string): string {
 }
 
 /**
- * Read the tail of today's (and optionally yesterday's) log file.
- *
- * Returns up to `maxBytes` of complete JSON lines, oldest-first. If the
- * tail starts mid-line we drop the partial leader.
- */
-export async function readRecentLogs(opts: { maxBytes: number }): Promise<string> {
-  const dir = logsDir();
-  if (!dir) return '';
-  const today = todayKey();
-  const yesterday = new Date(loggerOptions.now().getTime() - 86_400_000)
-    .toISOString()
-    .slice(0, 10)
-    .replace(/-/g, '');
-  const todayPath = join(dir, logFileName(today));
-  const yesterdayPath = join(dir, logFileName(yesterday));
-
-  const tail = await readTail(todayPath, opts.maxBytes);
-  if (tail.length >= opts.maxBytes / 2) return tail;
-
-  // Top up from yesterday's file if today's is sparse.
-  const remaining = opts.maxBytes - Buffer.byteLength(tail, 'utf8');
-  const earlier = await readTail(yesterdayPath, remaining);
-  return earlier + tail;
-}
-
-/**
  * Delete log files older than the retention window, then — oldest first —
  * whatever still pushes the total over `maxTotalBytes`. Today's file is never
  * removed: it is the one being written. Best-effort; runs on bridge startup

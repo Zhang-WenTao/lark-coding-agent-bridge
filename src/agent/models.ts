@@ -99,11 +99,6 @@ function claudeAdditionalModels(now: number = Date.now()): ModelOption[] {
   return entries;
 }
 
-/** Test hook: forget the memoized Claude extras. */
-export function resetClaudeModelCache(): void {
-  claudeExtrasCache = undefined;
-}
-
 function claudeModels(): ModelOption[] {
   const out: ModelOption[] = [{ value: DEFAULT_MODEL, label: '跟随默认（不指定）' }, ...CLAUDE_ALIASES];
   for (const extra of claudeAdditionalModels()) {

@@ -49,19 +49,6 @@ interface ClaudeRawEvent {
   summary?: string;
 }
 
-/**
- * A `result` that closes a turn in which the model never ran. On `--resume`
- * Claude Code first drains task notifications left over from the previous
- * process (e.g. a background Bash that died when the bridge reaped that
- * process after `done`) and closes that drain with its own `num_turns: 0`
- * result — before our prompt has reached the model. It is not the answer.
- */
-export function isNoTurnResult(raw: unknown): boolean {
-  if (!raw || typeof raw !== 'object') return false;
-  const evt = raw as ClaudeRawEvent;
-  return evt.type === 'result' && evt.num_turns === 0;
-}
-
 /** How a task's failure summary says the quota refused it. */
 const QUOTA_FAILURE = /error type rate_limit|HTTP 429|hit your (?:\w+ )?limit|usage limit/i;
 
@@ -236,9 +223,4 @@ function quotaWindows(
     });
   }
   return windows;
-}
-
-/** Encode one prompt as a stream-json user message (`--input-format stream-json`). */
-export function encodeUserMessage(prompt: string): string {
-  return `${JSON.stringify({ type: 'user', message: { role: 'user', content: [{ type: 'text', text: prompt }] } })}\n`;
 }
