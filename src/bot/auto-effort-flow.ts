@@ -108,10 +108,14 @@ export function startAutoEffort(input: StartAutoEffortInput): AutoEffortPlan {
     async pick(resumeFrom, liveProcess) {
       try {
         const current = store.forConversation(scope, resumeFrom);
+        // A manual rung (Fable) is in only when this message's prefix named it,
+        // or when a short follow-up ("继续") continues a run that was on it.
+        const manual = forced ?? (short && current && ladder[current.rung]?.manual ? current.rung : undefined);
         const allowed = allowedRungs(ladder, {
           owner: input.owner,
           ...(input.cap ? { cap: input.cap } : {}),
           blockedModels: blockedModels(),
+          ...(manual !== undefined ? { manual } : {}),
         });
         if (allowed.length === 0) return undefined;
         let decision: RungDecision;
@@ -175,7 +179,9 @@ export function startAutoEffort(input: StartAutoEffortInput): AutoEffortPlan {
       const rung = ladder[picked.rung];
       // A failed run on a model other than the bottom one (Fable): its quota
       // may be spent, so skip it for a while instead of failing again.
-      if (outcome.terminal === 'error' && rung && rung.model !== ladder[0]?.model) {
+      // "Fable 5.2 requires usage credits" ends the run as paused (read as a
+      // spent quota), so a pause counts too.
+      if ((outcome.terminal === 'error' || outcome.terminal === 'paused') && rung && rung.model !== ladder[0]?.model) {
         store.blockModel(rung.model, now());
         log.warn('auto-effort', 'model-blocked', { scope, model: rung.model });
       }

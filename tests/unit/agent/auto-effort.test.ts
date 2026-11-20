@@ -16,29 +16,39 @@ import {
 } from '../../../src/agent/auto-effort';
 
 const ladder = DEFAULT_AUTO_EFFORT_LADDER;
+// medium, high, xhigh, max climb automatically; fable (4) is reached only by `/fable`.
 const all = [0, 1, 2, 3];
+const withFable = [0, 1, 2, 3, 4];
 
 describe('allowedRungs', () => {
-  it('lets the owner climb the whole ladder', () => {
+  it('lets the owner climb the whole automatic ladder', () => {
     expect(allowedRungs(ladder, { owner: true, cap: 'high' })).toEqual(all);
+  });
+
+  it('keeps the manual Fable rung out unless it is the one named', () => {
+    expect(allowedRungs(ladder, { owner: true })).toEqual(all);
+    expect(allowedRungs(ladder, { owner: true, manual: 4 })).toEqual(withFable);
+    // Fable is owner-only: naming it does not open it to anyone else.
+    expect(allowedRungs(ladder, { owner: false, cap: 'max', manual: 4 })).toEqual(all);
   });
 
   it('caps everyone else at the chat effort and keeps them off owner-only rungs', () => {
     expect(allowedRungs(ladder, { owner: false, cap: 'high' })).toEqual([0, 1]);
     expect(allowedRungs(ladder, { owner: false, cap: 'xhigh' })).toEqual([0, 1, 2]);
-    expect(allowedRungs(ladder, { owner: false, cap: 'max' })).toEqual([0, 1, 2]);
+    expect(allowedRungs(ladder, { owner: false, cap: 'max' })).toEqual(all);
     expect(allowedRungs(ladder, { owner: false, cap: 'low' })).toEqual([]);
   });
 
   it('skips rungs whose model is blocked', () => {
-    expect(allowedRungs(ladder, { owner: true, blockedModels: new Set(['fable']) })).toEqual([0, 1, 2]);
+    expect(allowedRungs(ladder, { owner: true, manual: 4, blockedModels: new Set(['fable']) })).toEqual(all);
   });
 });
 
 describe('decideRung', () => {
-  it('starts a new conversation where the rating says, but never on another model', () => {
+  it('starts a new conversation where the rating says, but never on a climb-only or another model', () => {
     expect(decideRung({ ladder, allowed: all, target: 2 })).toEqual({ rung: 2, downVotes: 0, via: 'fresh' });
     expect(decideRung({ ladder, allowed: all, target: 3 }).rung).toBe(2);
+    expect(decideRung({ ladder, allowed: withFable, target: 4 }).rung).toBe(2);
     expect(decideRung({ ladder, allowed: all }).rung).toBe(0);
     expect(decideRung({ ladder, allowed: [0, 1], target: 2 }).rung).toBe(1);
   });
@@ -60,11 +70,24 @@ describe('decideRung', () => {
     });
   });
 
+  it('climbs to max but no further on its own', () => {
+    expect(decideRung({ ladder, allowed: all, current: { rung: 3, downVotes: 0 }, target: 3 }).via).toBe('stay');
+    expect(decideRung({ ladder, allowed: all, current: { rung: 3, downVotes: 0 }, target: 0 }).rung).toBe(2);
+  });
+
   it('leaves a rung with its own model only after two ratings below it in a row', () => {
-    const first = decideRung({ ladder, allowed: all, current: { rung: 3, downVotes: 0 }, target: 1 });
-    expect(first).toEqual({ rung: 3, downVotes: 1, via: 'held' });
-    const second = decideRung({ ladder, allowed: all, current: { rung: 3, downVotes: first.downVotes }, target: 1 });
-    expect(second).toEqual({ rung: 2, downVotes: 0, via: 'down' });
+    const first = decideRung({ ladder, allowed: withFable, current: { rung: 4, downVotes: 0 }, target: 1 });
+    expect(first).toEqual({ rung: 4, downVotes: 1, via: 'held' });
+    const second = decideRung({ ladder, allowed: withFable, current: { rung: 4, downVotes: first.downVotes }, target: 1 });
+    expect(second).toEqual({ rung: 3, downVotes: 0, via: 'down' });
+  });
+
+  it('leaves Fable at once when the run no longer allows it (no /fable on this message)', () => {
+    expect(decideRung({ ladder, allowed: all, current: { rung: 4, downVotes: 0 }, target: 1 })).toEqual({
+      rung: 2,
+      downVotes: 0,
+      via: 'down',
+    });
   });
 
   it('stays put when the rating failed or matches', () => {
@@ -86,25 +109,34 @@ describe('decideRung', () => {
   });
 
   it('pulls a rung that is no longer allowed down to the highest allowed one', () => {
-    // Fable got blocked mid-conversation: continue from xhigh.
-    expect(decideRung({ ladder, allowed: [0, 1, 2], current: { rung: 3, downVotes: 0 }, target: 3 }).rung).toBe(2);
+    // Fable got blocked (or was not named) mid-conversation: continue from max.
+    expect(decideRung({ ladder, allowed: all, current: { rung: 4, downVotes: 0 }, target: 3 }).rung).toBe(3);
   });
 
   it('pins a forced rung, within what is allowed', () => {
-    expect(decideRung({ ladder, allowed: all, current: { rung: 0, downVotes: 0 }, forced: 3 })).toEqual({
-      rung: 3,
+    expect(decideRung({ ladder, allowed: withFable, current: { rung: 0, downVotes: 0 }, forced: 4 })).toEqual({
+      rung: 4,
       downVotes: 0,
       via: 'forced',
     });
+    expect(decideRung({ ladder, allowed: all, forced: 3 })).toEqual({ rung: 3, downVotes: 0, via: 'forced' });
     expect(decideRung({ ladder, allowed: [0, 1], forced: 3 }).rung).toBe(1);
   });
 });
 
 describe('forcedRung', () => {
   it('reads a /<label> prefix', () => {
-    expect(forcedRung(ladder, '/fable 帮我设计一下')).toBe(3);
+    expect(forcedRung(ladder, '/fable 帮我设计一下')).toBe(4);
+    expect(forcedRung(ladder, '/max 帮我设计一下')).toBe(3);
     expect(forcedRung(ladder, '  /HIGH')).toBe(1);
     expect(forcedRung(ladder, '/xhigh\n看下这个')).toBe(2);
+  });
+
+  it('sees the prefix behind images or files posted ahead of the text', () => {
+    expect(forcedRung(ladder, '![image](img_v3_abc-123)\n/high 怎么现在是 Fable')).toBe(1);
+    expect(forcedRung(ladder, '![image](img_a) ![image](img_b) /fable 看图')).toBe(4);
+    expect(forcedRung(ladder, '[report.pdf](file_v3_x)\n/xhigh')).toBe(2);
+    expect(forcedRung(ladder, '![image](img_a)\n看下 /high')).toBeUndefined();
   });
 
   it('ignores anything else', () => {
@@ -132,7 +164,10 @@ describe('parseClassifierAnswer', () => {
   });
 
   it('rejects unknown levels and broken JSON', () => {
-    expect(parseClassifierAnswer(ladder, '{"level":"max"}')).toBeUndefined();
+    expect(parseClassifierAnswer(ladder, '{"level":"ultra"}')).toBeUndefined();
+    // The rating may not pick a manual rung.
+    expect(parseClassifierAnswer(ladder, '{"level":"fable"}')).toBeUndefined();
+    expect(parseClassifierAnswer(ladder, '{"level":"max"}')).toEqual({ rung: 3 });
     expect(parseClassifierAnswer(ladder, '{"level":')).toBeUndefined();
     expect(parseClassifierAnswer(ladder, 'high')).toBeUndefined();
   });
@@ -170,7 +205,15 @@ describe('resolveAutoEffort', () => {
 
   it('fills in the defaults', () => {
     const s = resolveAutoEffort({ enabled: true });
-    expect(s?.ladder.map((r) => r.label)).toEqual(['medium', 'high', 'xhigh', 'fable']);
+    expect(s?.ladder.map((r) => r.label)).toEqual(['medium', 'high', 'xhigh', 'max', 'fable']);
+    expect(s?.ladder.map((r) => `${r.model}/${r.effort}`)).toEqual([
+      'opus/medium',
+      'opus/high',
+      'opus/xhigh',
+      'opus/max',
+      'fable/xhigh',
+    ]);
+    expect(s?.ladder.filter((r) => r.manual).map((r) => r.label)).toEqual(['fable']);
     expect(s?.classifierModel).toBe('opus');
     expect(s?.classifierEffort).toBe('medium');
     expect(s?.timeoutMs).toBe(20_000);
@@ -183,7 +226,7 @@ describe('resolveAutoEffort', () => {
       classifierEffort: 'ultra',
       timeoutMs: 999_999,
     });
-    expect(s?.ladder).toHaveLength(4);
+    expect(s?.ladder).toHaveLength(5);
     expect(s?.classifierEffort).toBe('medium');
     expect(s?.timeoutMs).toBe(60_000);
   });

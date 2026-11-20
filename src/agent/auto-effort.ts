@@ -9,9 +9,10 @@ import { EFFORT_LEVELS, type AutoEffortPreference, type EffortLevel } from '../c
 /**
  * 自动分级: before each chat run, a quick model call rates how hard the
  * message is, and the run's model / effort climb or drop one rung at a time
- * on a ladder (opus·medium → opus·high → opus·xhigh → fable·xhigh by
- * default). Rules come first and skip the call:
- *  - a `/<rung>` prefix (`/high`, `/fable`, …) pins that rung;
+ * on a ladder (opus·medium → opus·high → opus·xhigh → opus·max by default).
+ * Fable sits above it as a manual rung: only a `/fable` prefix reaches it, the
+ * rating and climbing never do. Rules come first and skip the call:
+ *  - a `/<rung>` prefix (`/high`, `/max`, `/fable`, …) pins that rung;
  *  - a short follow-up ("继续", "好的") keeps the current rung, and on a new
  *    conversation starts at the bottom.
  * A new conversation starts wherever the rating says, but never on a rung
@@ -30,6 +31,10 @@ export interface AutoEffortRung {
   ownerOnly?: boolean;
   /** What belongs on this rung, for the rating prompt. */
   hint?: string;
+  /** Reached only by a `/<label>` prefix (and kept by short follow-ups): the rating and climbing never land on it. */
+  manual?: boolean;
+  /** A new conversation never starts here: it is reached by climbing. */
+  climbOnly?: boolean;
   /** The model's own quota window (e.g. Fable's weekly one): past {@link AutoEffortSettings.quotaLine} on the run's account, the rung is skipped. */
   quotaWindow?: string;
 }
@@ -63,12 +68,20 @@ export const DEFAULT_AUTO_EFFORT_LADDER: readonly AutoEffortRung[] = [
     hint: '多系统联合排障、根因分析、跨模块改代码、方案设计、长报告',
   },
   {
+    label: 'max',
+    model: 'opus',
+    effort: 'max',
+    climbOnly: true,
+    hint: '极难：架构级设计、大型改动、上一档反复失败或被用户指出不对仍没解决',
+  },
+  {
     label: 'fable',
     model: 'fable',
     effort: 'xhigh',
     ownerOnly: true,
+    manual: true,
     quotaWindow: FABLE_WINDOW,
-    hint: '极难：架构级设计、大型改动、上一档反复失败或被用户指出不对仍没解决',
+    hint: '只能由主人用 /fable 指定，不参与自动分级',
   },
 ];
 
@@ -100,14 +113,20 @@ export interface RungDecision {
   via: 'forced' | 'fresh' | 'up' | 'down' | 'stay' | 'held';
 }
 
-/** Rungs a run may use: the owner's may climb the whole ladder; anyone else's stay at or under the chat's effort and off owner-only rungs. */
+/**
+ * Rungs a run may use: the owner's may climb the whole ladder; anyone else's
+ * stay at or under the chat's effort and off owner-only rungs. A manual rung
+ * is in only when it is `manual` (the one a prefix named, or the one a short
+ * follow-up keeps).
+ */
 export function allowedRungs(
   ladder: readonly AutoEffortRung[],
-  opts: { owner: boolean; cap?: EffortLevel; blockedModels?: ReadonlySet<string> },
+  opts: { owner: boolean; cap?: EffortLevel; blockedModels?: ReadonlySet<string>; manual?: number },
 ): number[] {
   const capRank = opts.cap !== undefined ? EFFORT_RANK[opts.cap] : undefined;
   const out: number[] = [];
   ladder.forEach((rung, i) => {
+    if (rung.manual && opts.manual !== i) return;
     if (opts.blockedModels?.has(rung.model)) return;
     if (!opts.owner) {
       if (rung.ownerOnly) return;
@@ -145,11 +164,12 @@ export function decideRung(input: {
     return { rung: allowed[seat(allowed, input.forced)]!, downVotes: 0, via: 'forced' };
   }
   if (!input.current) {
-    // Start on the first model only: another model is reached by climbing.
+    // Start on the first model only, and not on a climb-only or manual
+    // rung: those are reached by climbing or by a prefix.
     const firstModel = ladder[0]?.model;
     let top = 0;
     ladder.forEach((rung, i) => {
-      if (rung.model === firstModel) top = i;
+      if (rung.model === firstModel && !rung.climbOnly && !rung.manual) top = i;
     });
     const start = Math.min(input.target ?? 0, top);
     return { rung: allowed[seat(allowed, start)]!, downVotes: 0, via: 'fresh' };
@@ -171,9 +191,15 @@ export function decideRung(input: {
   return { rung: below, downVotes: 0, via: 'down' };
 }
 
-/** `/fable 帮我…` → the `fable` rung. Case-insensitive; the prefix must stand alone. */
+/** Images and files a rich-text message carries ahead of its text (`![image](img_…)`). */
+const LEADING_RESOURCES_RE = /^(?:\s*!?\[[^\]\n]*\]\((?:img|image|file|media)_[^)\s]*\))+/i;
+
+/**
+ * `/fable 帮我…` → the `fable` rung. Case-insensitive; the prefix must stand
+ * alone. Images or files posted ahead of the text don't hide it.
+ */
 export function forcedRung(ladder: readonly AutoEffortRung[], text: string): number | undefined {
-  const m = /^\s*\/([A-Za-z][\w-]*)(?:\s|$)/.exec(text);
+  const m = /^\s*\/([A-Za-z][\w-]*)(?:\s|$)/.exec(text.replace(LEADING_RESOURCES_RE, ''));
   if (!m) return undefined;
   const name = m[1]!.toLowerCase();
   const i = ladder.findIndex((r) => r.label.toLowerCase() === name);
@@ -186,14 +212,16 @@ export function isShortFollowUp(text: string, attachments: number): boolean {
 
 /** The rating prompt's system part: what each rung is for and the answer format. */
 export function classifierSystemPrompt(ladder: readonly AutoEffortRung[]): string {
-  const levels = ladder.map((r) => `- ${r.label}：${r.hint ?? `${r.model} · ${r.effort}`}`).join('\n');
+  // Manual rungs are not the rating's to pick.
+  const rated = ladder.filter((r) => !r.manual);
+  const levels = rated.map((r) => `- ${r.label}：${r.hint ?? `${r.model} · ${r.effort}`}`).join('\n');
   return [
     '你是任务难度分级器。根据用户发给编程与运维助手的消息，判断完成它需要的推理档位。',
     '档位从低到高：',
     levels,
     '规则：只看完成任务本身的难度，不看消息长短；对上一轮的简单跟进（继续、好的、照做）沿用当前档位；',
     '上一轮失败、超时，或用户说结果不对、还是不行时，倾向高一档。',
-    `只输出一个 JSON，不要其他文字：{"level":"${ladder.map((r) => r.label).join('|')}","reason":"不超过 20 字"}`,
+    `只输出一个 JSON，不要其他文字：{"level":"${rated.map((r) => r.label).join('|')}","reason":"不超过 20 字"}`,
   ].join('\n');
 }
 
@@ -244,7 +272,7 @@ export function parseClassifierAnswer(
   }
   const level = (doc as { level?: unknown }).level;
   if (typeof level !== 'string') return undefined;
-  const rung = ladder.findIndex((r) => r.label.toLowerCase() === level.trim().toLowerCase());
+  const rung = ladder.findIndex((r) => !r.manual && r.label.toLowerCase() === level.trim().toLowerCase());
   if (rung < 0) return undefined;
   const reason = (doc as { reason?: unknown }).reason;
   return { rung, ...(typeof reason === 'string' && reason ? { reason: reason.slice(0, 60) } : {}) };
