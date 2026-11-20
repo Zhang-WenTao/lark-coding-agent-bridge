@@ -39,6 +39,8 @@
 // the model. String matching, not a sandbox: it stops the plain ways of doing
 // it, and the agent is told the same rules in its system prompt.
 
+import { spawnSync } from 'node:child_process';
+import { readFileSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 
@@ -676,7 +678,7 @@ function nextDir(segment, here) {
   return cd?.dir ?? here;
 }
 
-function decideBash(command, cfg, cwd) {
+function decideBash(command, cfg, cwd, depth = 0) {
   const full = normalize(String(command ?? ''), cfg.home);
   if (CONTROL.test(full)) return deny('这条命令会控制 bridge 进程（启停、重启或 launchd）');
   // What a search looks for is text: `git grep "INSERT INTO t"` and
@@ -705,10 +707,156 @@ function decideBash(command, cfg, cwd) {
   if (BARE_CD.test(cmd)) return deny('这条命令会进入主人的主目录');
   // Relative paths count from wherever the earlier `cd`s of this command left
   // the shell, so `cd a/b && ls ../..` stays in the workspace it started in.
-  return walkSegments(segments, cwd, (segment, here) => {
+  const scopeRefusal = walkSegments(segments, cwd, (segment, here) => {
     const refused = outOfScope(segment, here, cfg);
     return refused ? { refused } : { here: nextDir(segment, here) };
   });
+  if (scopeRefusal) return scopeRefusal;
+  return scriptRefusal(full, cmd, segments, cfg, cwd, depth);
+}
+
+// ── Scripts the run could have written itself ──────────────────────────────
+// The checks above read the command line only, so `cat > /tmp/a.sh <<'EOF' …
+// EOF; bash /tmp/a.sh` or a file made with Write and then run would carry
+// anything past them. When a command runs a script from a place this run can
+// write to, the script's text is checked too: shell scripts as commands, other
+// languages for fenced / unopened paths and denied commands. Scripts in places
+// the run cannot write (skill libraries, read-only roots) are the owner's and
+// run as they are — that is how skill scripts read what guests may not.
+
+const SCRIPT_SHELLS = new Set(["bash", "sh", "zsh", "dash", "ksh", "source", "."]);
+const INTERPRETERS = /^(?:python[\d.]*|node|ruby|perl|php|deno|bun|tsx|ts-node|osascript|Rscript|lua)$/;
+const MAX_SCRIPT_BYTES = 1024 * 1024;
+const MAX_SCRIPT_DEPTH = 3;
+
+/** `{ path, shell }` of the script a segment runs, if it runs one from a file. */
+function scriptOf(segment, here, home, line = '') {
+  const words = shellWords(segment.replace(LEAD, '')).map((w) => w.text.replace(/^(['"])(.*)\1$/, '$2'));
+  let i = 0;
+  while (i < words.length && (/^[A-Za-z_]\w*=/.test(words[i]) || ['sudo', 'env', 'exec', 'command', 'nohup', 'time'].includes(words[i]))) i++;
+  const cmd = words[i];
+  if (!cmd) return null;
+  const base = cmd.split('/').pop();
+  const at = (w) => (w ? resolve(here, normalize(w, home)) : null);
+  if (SCRIPT_SHELLS.has(base) || INTERPRETERS.test(base)) {
+    const args = words.slice(i + 1);
+    // `-c '…'` / `-e '…'` / `-m mod` / `-` (stdin): nothing from a file.
+    if (args.some((a) => /^-(?:[a-zA-Z]*c|e|m|-eval|-command)$/.test(a))) return null;
+    const file = args.find((a) => !a.startsWith('-'));
+    return file ? { path: at(file), shell: SCRIPT_SHELLS.has(base) } : null;
+  }
+  // `./run.sh`, `/tmp/x`: an executable file in command position.
+  if (cmd.includes('/')) {
+    const path = at(cmd);
+    try {
+      const st = statSync(path);
+      // `chmod +x f && ./f` on one line: not executable yet when we look.
+      const madeExecutable = new RegExp(`\\bchmod\\b[^;&|\\n]*${escapeRe(path.split('/').pop())}`).test(line);
+      return st.isFile() && ((st.mode & 0o111) !== 0 || madeExecutable) ? { path, shell: null } : null;
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+/** Could this run have written `path` (in scope, under no fence)? */
+function runWritable(path, cfg) {
+  return inScope(path, cfg) && !(cfg.rules ?? []).some((rule) => within(path, rule.path));
+}
+
+/**
+ * `cat > f <<'EOF' … EOF` / `tee f <<'EOF'` written on this line: the target's
+ * last path part and the body. Data on the line, maybe a script later.
+ */
+function heredocFiles(cmd) {
+  const files = [];
+  for (const m of cmd.matchAll(HEREDOC)) {
+    if (!isDataSink(m[1])) continue;
+    const target = /(?:>{1,2}\s*|\btee\s+(?:-a\s+)?)(['"]?)([^\s'"<>;|&]+)\1/.exec(m[1].replace(/<<-?[ \t]*(['"])[A-Za-z_][\w-]*\1/, ''))?.[2];
+    const body = m[0].slice(m[1].length + 1).replace(new RegExp(`\\n[ \\t]*${m[3]}[ \\t]*$`), '');
+    files.push({ name: target ? target.split('/').pop() : null, body });
+  }
+  return files;
+}
+
+/**
+ * A repository's own script, as reviewed upstream: tracked, and the same as
+ * on a remote-tracking branch. Editing it locally, or a local-only commit,
+ * makes it the run's text again.
+ */
+function upstreamScript(path) {
+  const git = (...args) => spawnSync('git', ['-C', dirname(path), ...args], { encoding: 'utf8', timeout: 3000 });
+  if (git('ls-files', '--error-unmatch', '--', path).status !== 0) return false;
+  for (const ref of ['@{upstream}', 'origin/HEAD', 'origin/dev', 'origin/main', 'origin/master']) {
+    const diff = git('diff', '--quiet', ref, '--', path);
+    if (diff.status === 0) return true;
+  }
+  return false;
+}
+
+function readScript(path) {
+  try {
+    const st = statSync(path);
+    if (!st.isFile()) return undefined;
+    if (st.size > MAX_SCRIPT_BYTES) return null;
+    return readFileSync(path, 'utf8');
+  } catch {
+    return undefined;
+  }
+}
+
+/** Does a non-shell script's text touch what the command line may not? */
+function textRefusal(text, cfg, here) {
+  // Only places closed to reading: a script that names a read-only root may
+  // well just read it.
+  for (const rule of cfg.rules ?? []) {
+    if (rule.bash === 'any' && fenced(rule.path, rule) && mentioned(text, rule) !== null) {
+      return deny(`脚本里访问了未对外开放的位置：${rule.path}`);
+    }
+  }
+  for (const re of [...(cfg.deniedCommands ?? []), ...(cfg.deniedContent ?? [])]) {
+    if (new RegExp(re).test(text)) return deny('脚本里含有仅限主人的操作');
+  }
+  const home = cfg.home;
+  const homeRe = new RegExp(`(?:~|\\$HOME|\\$\\{HOME\\}|${escapeRe(home)})(?:/[^\\s'"\`;|&()<>{}\\]\\[,]+)+`, 'g');
+  for (const m of text.matchAll(homeRe)) {
+    const path = resolve(here, normalize(m[0], home));
+    if (!inScope(path, cfg)) return deny(`脚本里访问了未对外开放的位置：${path}`, scopeHint(path, cfg));
+  }
+  return null;
+}
+
+// Any heredoc, quoted or not: its body is input, never a command line here.
+const ANY_HEREDOC = /^([^\n]*<<-?[ \t]*(['"]?)([A-Za-z_][\w-]*)\2[^\n]*)\n[\s\S]*?\n[ \t]*\3[ \t]*$/gm;
+
+function scriptRefusal(full, cmd, segments, cfg, cwd, depth) {
+  const runs = [];
+  const lines = blankSearchPatterns(full.replace(ANY_HEREDOC, (_whole, header) => header));
+  walkSegments(lines.split(SEGMENTS).filter((x) => x.trim()), cwd, (segment, here) => {
+    const script = scriptOf(segment, here, cfg.home, lines);
+    if (script) runs.push({ ...script, here });
+    return { here: nextDir(segment, here) };
+  });
+  if (runs.length === 0) return null;
+  if (depth >= MAX_SCRIPT_DEPTH) return deny('脚本嵌套调用太深，无法逐层检查');
+  // Written on this very line: check what the heredocs hold, whichever file it is.
+  const written = heredocFiles(full);
+  for (const run of runs) {
+    // A heredoc whose target we cannot read could be any file: check it too.
+    for (const { body } of written.filter((f) => f.name === null || f.name === run.path.split('/').pop())) {
+      const refused = run.shell === false ? textRefusal(body, cfg, run.here) : decideBash(body, cfg, run.here, depth + 1);
+      if (refused) return refused;
+    }
+    if (!runWritable(run.path, cfg) || upstreamScript(run.path)) continue;
+    const text = readScript(run.path);
+    if (text === undefined) continue;
+    if (text === null) return deny(`脚本太大，无法检查：${run.path}`);
+    const shell = run.shell ?? /^#!\s*\S*\/(?:env\s+)?(?:ba|z|da|k)?sh\b/.test(text);
+    const refused = shell ? decideBash(text, cfg, run.here, depth + 1) : textRefusal(text, cfg, run.here);
+    if (refused) return refused;
+  }
+  return null;
 }
 
 const count = (text, c) => text.split(c).length - 1;

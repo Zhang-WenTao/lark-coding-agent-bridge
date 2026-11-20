@@ -1,4 +1,7 @@
 import { spawnSync } from 'node:child_process';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   bridgeRoot,
@@ -354,5 +357,66 @@ describe("guest runs: the run's own tool output is never writable", () => {
 
   it('still reads it', () => {
     expect(bash(`cat ${dir}/a.txt`, session).code).toBe(0);
+  });
+});
+
+describe('guest runs: scripts the run wrote itself', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'guard-script-'));
+  const file = (name: string, text: string) => {
+    const path = join(dir, name);
+    writeFileSync(path, text);
+    return path;
+  };
+  const sneakyShell = file('a.sh', `#!/bin/bash\ncat ${HOME}/.ssh/id_rsa\n`);
+  const sneakyNoExt = file('run', `#!/bin/sh\ntouch ${READ_ONLY}/x\n`);
+  const sneakyPy = file('a.py', `print(open("${HOME}/.occam/tasks/x/out.json").read())\n`);
+  const sneakyHome = file('b.py', `import os\nprint(open(os.path.expanduser("~/Documents/secret.txt")).read())\n`);
+  const plainPy = file('ok.py', `import json\nprint(json.dumps({"a": 1}))\n`);
+  const plainSh = file('ok.sh', `#!/bin/bash\nset -e\nls ${OPEN}\necho done > /tmp/guard-ok.txt\n`);
+
+  it.each([
+    ['a shell script reading a private file', `bash ${sneakyShell}`],
+    ['the same through source', `source ${sneakyShell}`],
+    ['a script run by path, shebang decides', `chmod +x ${sneakyNoExt} && ${sneakyNoExt}`],
+    ['a python script naming a private path', `python3 ${sneakyPy}`],
+    ['a python script reaching outside the open places', `cd ${dir} && python3 b.py`],
+    ['a heredoc written then run', `cat > /tmp/z.sh <<'EOF'\ncat ${HOME}/.ssh/id_rsa\nEOF\nbash /tmp/z.sh`],
+    ['a heredoc python written then run', `cat > /tmp/z.py <<'EOF'\nopen("${HOME}/.ssh/id_rsa")\nEOF\npython3 /tmp/z.py`],
+  ])('refuses %s', (_label, command) => {
+    expect(bash(command).code).toBe(2);
+  });
+
+  it.each([
+    ['a plain python script', `python3 ${plainPy}`],
+    ['a plain shell script', `bash ${plainSh}`],
+    ['inline python', `python3 -c 'print(1)'`],
+    ['a heredoc note next to an unrelated script', `cat > /tmp/n.md <<'EOF'\n见 ${HOME}/.ssh\nEOF\npython3 ${plainPy}`],
+    ['a skill script in a read-only place (the owner wrote it)', `bash ${READ_ONLY}/scripts/q.sh sea mysql "select 1"`],
+    ['a script that does not exist yet', `python3 /tmp/guard-missing-${process.pid}.py`],
+  ])('allows %s', (_label, command) => {
+    expect(bash(command).code).toBe(0);
+  });
+});
+
+describe("guest runs: a repository's own scripts", () => {
+  const base = mkdtempSync(join(tmpdir(), 'guard-repo-'));
+  const run = (cwd: string, ...args: string[]) => spawnSync('git', args, { cwd, encoding: 'utf8' });
+  run(base, 'init', '-q', '--bare', 'origin.git');
+  run(base, 'clone', '-q', 'origin.git', 'work');
+  const work = join(base, 'work');
+  run(work, 'config', 'user.email', 't@example.com');
+  run(work, 'config', 'user.name', 't');
+  writeFileSync(join(work, 'check.sh'), `#!/bin/bash\ncat ${HOME}/.ssh/known_hosts | wc -l\n`);
+  run(work, 'add', 'check.sh');
+  run(work, 'commit', '-qm', 'x');
+  run(work, 'push', '-q', 'origin', 'HEAD');
+
+  it('runs one that matches upstream as it is', () => {
+    expect(bash(`bash ${work}/check.sh`).code).toBe(0);
+  });
+
+  it('checks it again once it is edited locally', () => {
+    writeFileSync(join(work, 'check.sh'), `#!/bin/bash\ncat ${HOME}/.ssh/id_rsa\n`);
+    expect(bash(`bash ${work}/check.sh`).code).toBe(2);
   });
 });
