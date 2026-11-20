@@ -205,10 +205,10 @@ import {
   supplementRole,
   supplementSignal,
 } from './supplement';
-import { applyRecall, parseRecallEvent, RECALL_EVENT, RecalledMessages, settleEarlyRecalls } from './recall';
+import { applyRecall, RecalledMessages, settleEarlyRecalls } from './recall';
+import { registerChannelEvents } from './channel-events';
 import { attachEventHooks, resolveEventHooks } from '../events/hooks';
 import {
-  EDIT_EVENT,
   type EditEvent,
   EditedMessages,
   editInstruction,
@@ -216,7 +216,6 @@ import {
   editSupplementInstruction,
   isEdited,
   markEdited,
-  parseEditEvent,
   runForMessage,
 } from './edit';
 import { mediaPlaceholders } from './media-placeholders';
@@ -746,163 +745,69 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       })
     : undefined;
 
-  // Counter for stdout reconnect escalation; reset on `reconnected`.
-  let consecutiveReconnects = 0;
-
-  channel.on({
-    message: async (msg) => {
-      await withTrace({ chatId: msg.chatId, msgId: msg.messageId }, () =>
-        intakeMessage({
-          channel,
-          agent,
-          sessions,
-          sessionCatalog,
-          workspaces,
-          activeRuns,
-          pending,
-          media,
-          msg,
-          controls,
-          chatModeCache,
-          logThreadModeOverride,
-          executor,
-          pool,
-          autoResumer,
-          recalled,
-        }),
-      ).catch((err) => log.fail('intake', err));
-    },
-    reject: (evt) => {
-      log.info('intake', 'reject', { chatId: evt.chatId, reason: evt.reason });
-    },
-    cardAction: async (evt) => {
-      await withTrace({ chatId: evt.chatId, msgId: evt.messageId }, async () => {
-        await handleCardAction({
-          channel,
-          evt,
-          sessions,
-          sessionCatalog,
-          workspaces,
-          activeRuns,
-          agent,
-          processPool: pool,
-          runExecutor: executor,
-          controls,
-          pending,
-          chatModeCache,
-          callbackAuth,
-          autoResumer,
-          callbackPolicyFingerprintForScope: (scope) => activePolicyFingerprints.get(scope),
-        });
-      }).catch((err) => log.fail('cardAction', err));
-    },
-    comment: async (evt) => {
-      await withTrace({ chatId: 'comment' }, async () => {
-        await handleCommentMention({
-          channel,
-          evt,
-          agent,
-          sessions,
-          sessionCatalog,
-          workspaces,
-          activeRuns,
-          executor,
-          controls,
-        }).catch((err) => log.fail('comment', err));
-      }).catch((err) => log.fail('comment', err));
-    },
-    reconnecting: () => {
-      consecutiveReconnects++;
-      log.warn('ws', 'reconnecting', { consecutive: consecutiveReconnects });
-      reportMetric('ws_reconnect', 1, { kind: 'ws' });
-      // Stdout escalation — surface jitter that's hidden in the file log.
-      if (consecutiveReconnects === 3) {
-        console.error('⚠️ 已连续重连 3 次,网络可能不稳。');
-      } else if (consecutiveReconnects === 10) {
-        console.error('❌ 已连续重连 10 次,建议在飞书发 /reconnect 或重启 bot。');
-      }
-    },
-    reconnected: () => {
-      if (consecutiveReconnects > 1) {
-        log.info('ws', 'recovered', { afterAttempts: consecutiveReconnects });
-      } else {
-        log.info('ws', 'reconnected');
-      }
-      consecutiveReconnects = 0;
-    },
-    // Classify common WS errors into the `network` phase so /doctor and grep
-    // can find them without scanning generic `ws.fail` entries.
-    error: (err) => {
-      const msg = err?.message ?? String(err);
-      if (/ENOTFOUND|getaddrinfo/.test(msg)) {
-        log.fail('network', err, { kind: 'dns', code: err.code });
-      } else if (/handshake|did not complete/.test(msg)) {
-        log.fail('network', err, { kind: 'handshake-timeout', code: err.code });
-      } else if (/timeout/i.test(msg)) {
-        log.fail('network', err, { kind: 'timeout', code: err.code });
-      } else {
-        log.fail('ws', err, { code: err.code });
-      }
-    },
-  });
-
-  // 撤回消息: rides the existing connection like the meeting events below
-  // (a second long connection would split delivery). Only arrives once the
-  // app subscribes to "消息被撤回" in the developer console.
-  if (typeof channel.onRawEvent === 'function') {
-    channel.onRawEvent(RECALL_EVENT, (raw) => {
-      const evt = parseRecallEvent(raw);
-      if (!evt) {
-        log.warn('recall', 'unparsed', {});
-        return;
-      }
+  const edits = new EditedMessages();
+  const intakeDeps = {
+    channel,
+    agent,
+    sessions,
+    sessionCatalog,
+    workspaces,
+    activeRuns,
+    pending,
+    media,
+    controls,
+    chatModeCache,
+    logThreadModeOverride,
+    executor,
+    pool,
+    autoResumer,
+    recalled,
+  };
+  registerChannelEvents(channel, {
+    message: (msg) => intakeMessage({ ...intakeDeps, msg }),
+    cardAction: (evt) =>
+      handleCardAction({
+        channel,
+        evt,
+        sessions,
+        sessionCatalog,
+        workspaces,
+        activeRuns,
+        agent,
+        processPool: pool,
+        runExecutor: executor,
+        controls,
+        pending,
+        chatModeCache,
+        callbackAuth,
+        autoResumer,
+        callbackPolicyFingerprintForScope: (scope) => activePolicyFingerprints.get(scope),
+      }),
+    comment: (evt) =>
+      handleCommentMention({
+        channel,
+        evt,
+        agent,
+        sessions,
+        sessionCatalog,
+        workspaces,
+        activeRuns,
+        executor,
+        controls,
+      }),
+    recall: (evt) => {
       const outcome = applyRecall(evt.messageId, { pending, activeRuns, recalled });
-      log.info('recall', outcome.action, {
+      return {
+        action: outcome.action,
         msgId: evt.messageId,
         chatId: evt.chatId,
         recallType: evt.recallType,
         ...(outcome.action === 'none' ? {} : { scope: outcome.scope }),
         ...(outcome.action === 'voided' ? { injected: outcome.injected } : {}),
-      });
-    });
-  } else {
-    log.warn('recall', 'hook-unavailable', { reason: 'channel 不支持 onRawEvent' });
-  }
-
-  // 消息被编辑: rides the same connection as the recall events above, and
-  // likewise only arrives once the app subscribes to "消息被编辑" in the
-  // developer console.
-  const edits = new EditedMessages();
-  if (typeof channel.onRawEvent === 'function') {
-    channel.onRawEvent(EDIT_EVENT, async (raw) => {
-      const evt = parseEditEvent(raw);
-      if (!evt) {
-        log.warn('edit', 'unparsed', {});
-        return;
-      }
-      await withTrace({ chatId: evt.chatId, msgId: evt.messageId }, () =>
-        intakeEdit({
-          evt,
-          edits,
-          channel,
-          agent,
-          sessions,
-          sessionCatalog,
-          workspaces,
-          activeRuns,
-          pending,
-          media,
-          controls,
-          chatModeCache,
-          logThreadModeOverride,
-          executor,
-          pool,
-          autoResumer,
-          recalled,
-        }),
-      ).catch((err) => log.fail('edit', err));
-    });
-  }
+      };
+    },
+    edit: (evt) => intakeEdit({ ...intakeDeps, evt, edits }),
+  });
 
   // 事件钩子: console-subscribed events (meeting starts, …) handed to local
   // commands, riding this connection for the same reason as recall/edit.
