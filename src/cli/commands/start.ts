@@ -58,6 +58,7 @@ export { assertReconnectAgentKindUnchanged, createRuntimeAgent };
 import { SessionStore } from '../../session/store';
 import { SessionCatalog } from '../../session/catalog';
 import { WorkspaceStore } from '../../workspace/store';
+import { crashExitHandler } from '../crash-exit';
 
 // Prefer IPv4 — Node 20+ defaults to "verbatim" which respects whatever
 // the resolver returns first; in IPv6-broken networks (WSL2, certain VPNs,
@@ -65,19 +66,30 @@ import { WorkspaceStore } from '../../workspace/store';
 // prefer v4 avoids that whole class of issue.
 dns.setDefaultResultOrder('ipv4first');
 
-// Process-level safety net: never let a stray SDK call / axios timeout
-// take the whole bot down. Most outbound calls (channel.send / rawClient.*)
-// are async; if any callsite misses a try/catch (or fires an update after
-// its enclosing scope returned), the rejection bubbles to here. Log and
-// keep the bot alive — losing a single reply is better than crashing.
+// Process-level safety net for promises: never let a stray SDK call / axios
+// timeout take the whole bot down. Most outbound calls (channel.send /
+// rawClient.*) are async; if any callsite misses a try/catch (or fires an
+// update after its enclosing scope returned), the rejection bubbles to here.
+// Log and keep the bot alive — losing a single reply is better than crashing.
 process.on('unhandledRejection', (reason) => {
   log.fail('process', reason, { kind: 'unhandledRejection' });
   reportError(reason, { kind: 'unhandledRejection' });
 });
-process.on('uncaughtException', (err) => {
-  log.fail('process', err, { kind: 'uncaughtException' });
-  reportError(err, { kind: 'uncaughtException' });
-});
+// A synchronous throw nobody caught is different: the process state is no
+// longer trustworthy. Shut down within a deadline and exit 1 so launchd
+// (`KeepAlive`) starts a clean one (crash-exit.ts).
+let orderlyShutdown: (() => Promise<void>) | undefined;
+process.on(
+  'uncaughtException',
+  crashExitHandler({
+    record: (err) => {
+      log.fail('process', err, { kind: 'uncaughtException', action: 'exit' });
+      reportError(err, { kind: 'uncaughtException' });
+    },
+    shutdown: () => orderlyShutdown,
+    exit: (code) => process.exit(code),
+  }),
+);
 
 const MEDIA_GC_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
@@ -233,10 +245,7 @@ function parkWithShutdown(
   hostLock: { release(): Promise<void> } | undefined,
 ): Promise<void> {
   let shuttingDown = false;
-  const shutdown = async (sig: string): Promise<void> => {
-    if (shuttingDown) return;
-    shuttingDown = true;
-    console.log(`\n收到 ${sig}，正在关闭...`);
+  const close = async (): Promise<void> => {
     if (uiServer) {
       await uiServer.close().catch(() => {});
       await removeUiSidecar(appPaths.hostUiFile);
@@ -244,7 +253,21 @@ function parkWithShutdown(
     await supervisor.shutdown();
     if (hostLock) await hostLock.release().catch(log.swallow('cli', 'lock-release-failed'));
     await flushTelemetry();
+  };
+  const shutdown = async (sig: string): Promise<void> => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log(`\n收到 ${sig}，正在关闭...`);
+    await close();
     process.exit(0);
+  };
+  // After an uncaught exception: the same teardown, the exit code is the
+  // crash handler's.
+  orderlyShutdown = async () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log('\n未捕获的异常，正在关闭后退出（launchd 会重新拉起）...');
+    await close();
   };
   process.on('SIGINT', () => void shutdown('SIGINT'));
   process.on('SIGTERM', () => void shutdown('SIGTERM'));
