@@ -247,19 +247,17 @@ export function defaultAccountsConfig(): ClaudeAccountsConfig {
 
 /**
  * Tolerant parse: malformed entries are dropped, `default` is added in front
- * when missing. Older files' `switchAtPercent` (one line for both windows) and
- * `reservePercent` (lines at 100 − reserve) still read.
+ * when missing.
  */
 export function parseAccountsConfig(text: string): ClaudeAccountsConfig {
   const config = defaultAccountsConfig();
-  let raw: { lines?: unknown; offDayLines?: unknown; offDayGraceHours?: unknown; switchAtPercent?: unknown; accounts?: unknown; stagger?: unknown };
+  let raw: { lines?: unknown; offDayLines?: unknown; offDayGraceHours?: unknown; accounts?: unknown; stagger?: unknown };
   try {
     raw = JSON.parse(text) as typeof raw;
   } catch {
     return config;
   }
   if (!raw || typeof raw !== 'object') return config;
-  if (isValidLine(raw.switchAtPercent)) config.lines = { five_hour: raw.switchAtPercent, seven_day: raw.switchAtPercent };
   config.lines = { ...config.lines, ...parseLines(raw.lines) };
   const offDay = parseLines(raw.offDayLines);
   if (Object.keys(offDay).length > 0) config.offDayLines = offDay;
@@ -270,22 +268,17 @@ export function parseAccountsConfig(text: string): ClaudeAccountsConfig {
   const seen = new Set<string>();
   for (const item of Array.isArray(raw.accounts) ? raw.accounts : []) {
     if (!item || typeof item !== 'object') continue;
-    const { id, label, lines, reservePercent, boost, pausedUntil, nicknames } = item as {
+    const { id, label, lines, boost, pausedUntil, nicknames } = item as {
       id?: unknown;
       label?: unknown;
       nicknames?: unknown;
       lines?: unknown;
-      reservePercent?: unknown;
       boost?: unknown;
       pausedUntil?: unknown;
     };
     if (typeof id !== 'string' || !isValidAccountId(id) || seen.has(id)) continue;
     seen.add(id);
-    const legacy =
-      typeof reservePercent === 'number' && isValidLine(100 - reservePercent)
-        ? { five_hour: 100 - reservePercent, seven_day: 100 - reservePercent }
-        : {};
-    const own = { ...legacy, ...parseLines(lines) };
+    const own = parseLines(lines);
     const raised = parseBoost(boost);
     const private_ = parseNicknames(nicknames);
     accounts.push({

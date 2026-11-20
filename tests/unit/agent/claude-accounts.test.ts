@@ -68,13 +68,13 @@ const HOUR = 3_600_000;
 const NOW = Date.UTC(2026, 9, 21, 2, 0);
 
 /** A pool over `ids` (after `default`) whose tokens are `tok-<id>`. */
-async function poolWith(ids: string[], opts: { switchAtPercent?: number; now?: () => number } = {}) {
+async function poolWith(ids: string[], opts: { line?: number; now?: () => number } = {}) {
   const dir = await tmp();
   const paths = claudeAccountsPaths(dir);
   await writeFile(
     paths.configFile,
     JSON.stringify({
-      ...(opts.switchAtPercent ? { switchAtPercent: opts.switchAtPercent } : {}),
+      ...(opts.line ? { lines: { five_hour: opts.line, seven_day: opts.line } } : {}),
       accounts: [{ id: 'default' }, ...ids.map((id) => ({ id, label: `${id}-name` }))],
     }),
   );
@@ -95,7 +95,7 @@ function limit(over: Partial<Extract<AgentEvent, { type: 'rate_limit' }>> = {}):
 describe('Claude account list', () => {
   it('keeps valid entries, adds the CLI login in front and defaults the threshold', () => {
     const config = parseAccountsConfig(
-      JSON.stringify({ accounts: [{ id: 'b', label: ' Bee ' }, { id: 'bad id' }, { id: 'b' }, 7], switchAtPercent: 400 }),
+      JSON.stringify({ accounts: [{ id: 'b', label: ' Bee ' }, { id: 'bad id' }, { id: 'b' }, 7] }),
     );
     expect(config).toEqual({ lines: { five_hour: 98, seven_day: 98 }, accounts: [{ id: 'default' }, { id: 'b', label: 'Bee' }] });
     expect(parseAccountsConfig('not json').accounts).toEqual([{ id: 'default' }]);
@@ -190,7 +190,7 @@ describe('ClaudeAccountPool', () => {
   });
 
   it('ignores model-specific windows unless they refuse, and honours the threshold', async () => {
-    const { pool } = await poolWith(['b'], { switchAtPercent: 90 });
+    const { pool } = await poolWith(['b'], { line: 90 });
     pool.observe('default', limit({ windows: [{ kind: 'seven_day_opus', usedPercent: 100, resetsAt: NOW + HOUR }] }));
     expect(pool.pick()?.id).toBe('default');
     pool.observe('default', limit({ windows: [{ kind: 'seven_day', usedPercent: 91, resetsAt: NOW + 3 * 24 * HOUR }] }));
@@ -1010,13 +1010,6 @@ describe('switch lines and rounds', () => {
     expect(pool.pickRunnable()).toBeUndefined();
     expect(pool.nextRunnableAt()).toBe(NOW + 2 * HOUR);
     expect(pool.pick()?.id).toBe('default');
-  });
-
-  it('reads the older single threshold and reserve settings', async () => {
-    const { pool } = await poolInOrder([{ id: 'default' }, { id: 'mia', reservePercent: 20 }], undefined);
-    expect(pool.lineOf('mia', 'five_hour')).toBe(80);
-    expect(pool.lineOf('mia', 'seven_day')).toBe(80);
-    expect(parseAccountsConfig(JSON.stringify({ switchAtPercent: 95 })).lines).toEqual({ five_hour: 95, seven_day: 95 });
   });
 
   it('sets lines, defaults and order without touching tokens', async () => {
