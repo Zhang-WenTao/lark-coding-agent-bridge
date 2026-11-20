@@ -6,7 +6,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   materializeEnvSecretForService,
   resolveProfileRuntime,
-} from '../../../src/runtime/profile-runtime';
+} from '../../../src/app/profile-runtime';
 import { createDefaultProfileConfig } from '../../../src/config/profile-schema';
 import { resolveAppPaths } from '../../../src/config/app-paths';
 import { getSecret } from '../../../src/config/keystore';

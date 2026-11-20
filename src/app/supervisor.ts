@@ -16,12 +16,12 @@ import {
   checkRuntimeAgentAvailability,
   createRuntimeAgent,
   releaseRuntimeLocks,
-} from './agent-runtime';
+} from '../runtime/agent-runtime';
 import {
   acquireAppRuntimeLock,
   acquireProfileRuntimeLock,
   type AcquiredRuntimeLock,
-} from './locks';
+} from '../runtime/locks';
 import { resolveProfileRuntime } from './profile-runtime';
 import {
   register,
@@ -29,7 +29,7 @@ import {
   unregisterSync,
   updateEntry,
   type ProcessEntry,
-} from './registry';
+} from '../runtime/registry';
 
 type StartChannelFn = typeof realStartChannel;
 

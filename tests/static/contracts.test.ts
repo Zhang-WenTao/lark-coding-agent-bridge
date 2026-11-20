@@ -66,10 +66,10 @@ describe('static architecture contracts', () => {
   it('branches on agent descriptors, not agent-kind string literals, outside agent-owned code', () => {
     // Agent-owned code may single out its own agent: adapters and catalogs
     // under src/agent, the codex config section in src/config and src/cli, and
-    // the legacy per-agent migrations in profile-runtime. Everything else goes
+    // the legacy per-agent migrations in app/profile-runtime. Everything else goes
     // through src/agent/registry.ts so a new agent is not silently treated as
     // "the other one".
-    const allowed = [/^src\/ui\/generated\//, /^src\/agent\//, /^src\/config\//, /^src\/cli\//, /^src\/runtime\/profile-runtime\.ts$/];
+    const allowed = [/^src\/ui\/generated\//, /^src\/agent\//, /^src\/config\//, /^src\/cli\//, /^src\/app\/profile-runtime\.ts$/];
     const literalBranch =
       /\b(?:agentKind|agentId|agent\.id)\s*[!=]==?\s*['"](?:claude|codex)['"]|['"](?:claude|codex)['"]\s*[!=]==?\s*[\w.]*\b(?:agentKind|agentId)\b/;
     const files = [...collectTsFiles('src'), ...collectTsFiles('web/src')].filter(

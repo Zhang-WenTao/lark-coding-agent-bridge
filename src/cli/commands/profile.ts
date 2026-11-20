@@ -21,7 +21,7 @@ import { writeFileAtomic } from '../../platform/atomic-write';
 import { acquireProfileRuntimeLock, checkRuntimeLock } from '../../runtime/locks';
 import { readAndPrune } from '../../runtime/registry';
 import { listAllProfiles } from '../../runtime/profile-discovery';
-import { resolveProfileRuntime } from '../../runtime/profile-runtime';
+import { resolveProfileRuntime } from '../../app/profile-runtime';
 
 export interface ProfileCommandOptions {
   rootDir?: string;

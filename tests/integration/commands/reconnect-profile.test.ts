@@ -46,7 +46,7 @@ describe('/reconnect profile lifecycle', () => {
 
   it('starts the replacement bridge with replacement controls before swapping globals', async () => {
     // Connect-before-disconnect reconnect now lives in the supervisor's ManagedProfile.
-    const source = await readFile(new URL('../../../src/runtime/supervisor.ts', import.meta.url), 'utf8');
+    const source = await readFile(new URL('../../../src/app/supervisor.ts', import.meta.url), 'utf8');
 
     expect(source).toContain('const nextControls = this.makeControls(nextRuntime.appPaths, next, nextRuntime.profileConfig)');
     expect(source).toContain('controls: nextControls');

@@ -8,7 +8,7 @@ import {
   loadRootConfig,
   saveRootConfig,
 } from '../../../src/config/profile-store';
-import { Supervisor } from '../../../src/runtime/supervisor';
+import { Supervisor } from '../../../src/app/supervisor';
 
 const roots: string[] = [];
 const started: string[] = [];

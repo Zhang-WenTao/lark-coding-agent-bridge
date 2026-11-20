@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { createDefaultProfileConfig } from '../../../src/config/profile-schema';
 import { createRootConfig, saveRootConfig } from '../../../src/config/profile-store';
 import { createRuntimeAgent } from '../../../src/cli/commands/start';
-import { resolveProfileRuntime } from '../../../src/runtime/profile-runtime';
+import { resolveProfileRuntime } from '../../../src/app/profile-runtime';
 
 const { loadRootConfig } = await import('../../../src/config/profile-store');
 

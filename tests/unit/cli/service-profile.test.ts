@@ -19,7 +19,7 @@ vi.mock('../../../src/daemon/service-adapter', () => ({
   getServiceAdapter: mocks.getServiceAdapter,
 }));
 
-vi.mock('../../../src/runtime/profile-runtime', () => ({
+vi.mock('../../../src/app/profile-runtime', () => ({
   materializeEnvSecretForService: mocks.materializeEnvSecretForService,
   resolveProfileRuntime: mocks.resolveProfileRuntime,
 }));

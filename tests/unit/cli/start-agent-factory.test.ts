@@ -7,7 +7,7 @@ import {
   createRuntimeAgent,
 } from '../../../src/cli/commands/start.js';
 import { createDefaultProfileConfig } from '../../../src/config/profile-schema.js';
-import { createRuntimeProfileConfig } from '../../../src/runtime/profile-runtime.js';
+import { createRuntimeProfileConfig } from '../../../src/app/profile-runtime.js';
 
 describe('start runtime agent factory', () => {
   it('keeps Claude as the default runtime agent', () => {
@@ -71,7 +71,7 @@ describe('start runtime agent factory', () => {
 
   it('updates the process registry before releasing the old app lock during reconnect', async () => {
     // Reconnect ordering now lives in the supervisor's ManagedProfile.restart().
-    const source = await readFile(join(process.cwd(), 'src/runtime/supervisor.ts'), 'utf8');
+    const source = await readFile(join(process.cwd(), 'src/app/supervisor.ts'), 'utf8');
     const restartStart = source.indexOf('async restart()');
     const updateIndex = source.indexOf('updateEntry(', restartStart);
     const releaseIndex = source.indexOf('oldAppLock?.release()', restartStart);
@@ -96,7 +96,7 @@ describe('start runtime agent factory', () => {
     expect(shutdownIndex).toBeLessThan(exitIndex);
 
     // And each channel's teardown releases its runtime locks.
-    const sup = await readFile(join(process.cwd(), 'src/runtime/supervisor.ts'), 'utf8');
+    const sup = await readFile(join(process.cwd(), 'src/app/supervisor.ts'), 'utf8');
     expect(sup).toContain('releaseRuntimeLocks(this.locks)');
   });
 

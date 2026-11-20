@@ -6,7 +6,7 @@ import { dirname, join, normalize, relative } from 'node:path';
  * Layering contract (docs/progress/bridge-refactor-analysis.md §1.2).
  * Dependencies may only point to the same or a lower layer:
  *
- *   L6 entry       cli/ ui/ daemon/ terminal/ index.ts  (+ runtime/supervisor.ts, runtime/profile-runtime.ts)
+ *   L6 entry       app/ cli/ ui/ daemon/ terminal/ index.ts
  *   L5 IM          bot/
  *   L4 features    commands/ scheduler/ meeting/ dream/ card/
  *   L3 runtime     runtime/
@@ -23,7 +23,7 @@ import { dirname, join, normalize, relative } from 'node:path';
 const root = process.cwd();
 
 const LAYER_BY_DIR: Record<string, number> = {
-  cli: 6, ui: 6, daemon: 6, terminal: 6,
+  app: 6, cli: 6, ui: 6, daemon: 6, terminal: 6,
   bot: 5,
   commands: 4, scheduler: 4, meeting: 4, dream: 4, card: 4,
   runtime: 3,
@@ -34,8 +34,6 @@ const LAYER_BY_DIR: Record<string, number> = {
 
 const LAYER_BY_FILE: Record<string, number> = {
   'src/index.ts': 6,
-  'src/runtime/supervisor.ts': 6,
-  'src/runtime/profile-runtime.ts': 6,
 };
 
 const layerOf = (file: string): number => {

@@ -2,7 +2,7 @@ import type { LarkChannel } from '@larksuite/channel';
 import type { KnownChat } from '../bot/lark-info';
 import type { MutableProfileState } from '../config/config-ops';
 import type { Controls } from '../commands/types';
-import type { ManagedStatus } from '../runtime/supervisor';
+import type { ManagedStatus } from '../app/supervisor';
 
 /**
  * The live per-profile runtime the console edits. The supervisor's `Controls`

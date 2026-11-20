@@ -25,7 +25,7 @@ import { gcMediaCache } from '../../media/cache';
 import { startUiServer } from '../../ui/server';
 import { readUiSidecar, removeUiSidecar, writeUiSidecar } from '../../ui/sidecar';
 import type { UiServerHandle } from '../../ui/types';
-import { Supervisor } from '../../runtime/supervisor';
+import { Supervisor } from '../../app/supervisor';
 import { acquireHostLock } from '../../runtime/host-lock';
 import { preFlightChecks } from '../preflight';
 import { stopProcessEntry, type StopProcessEntryResult } from './ps';
@@ -44,7 +44,7 @@ import {
   type AcquiredRuntimeLock,
   type RuntimeLockMeta,
 } from '../../runtime/locks';
-import { resolveProfileRuntime } from '../../runtime/profile-runtime';
+import { resolveProfileRuntime } from '../../app/profile-runtime';
 import {
   assertReconnectAgentKindUnchanged,
   checkRuntimeAgentAvailability,

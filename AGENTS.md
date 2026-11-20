@@ -42,7 +42,8 @@
 | 目录 | 职责 |
 |---|---|
 | `src/cli/` | 宿主 CLI：`run` / `start` / `restart` / `ps` / `profile`，首次 bootstrap、agent 自动检测 |
-| `src/runtime/` | profile 运行时装配、`run-executor`（提交 run、`done` 后回收进程）、supervisor、运行锁、在线 bot 注册表、adapter 工厂 |
+| `src/app/` | 进程入口装配：`supervisor`（拉起/重连 channel）、`profile-runtime`（解析 profile 与配置、首次 bootstrap） |
+| `src/runtime/` | `run-executor`（提交 run、`done` 后回收进程）、运行锁、在线 bot 注册表、adapter 工厂、active-runs、进程池 |
 | `src/agent/` | **agent 注册表 `registry.ts`**、各 agent adapter（`claude/`、`codex/`）、capability、模型目录、preflight、系统提示词 |
 | `src/bot/` | 飞书消息入口 `channel.ts`（排队、合并、回复投递）、`run-flow.ts`（策略 + 恢复会话 + 提交 run）、云文档评论、进程池、卡片流 |
 | `src/commands/` | 飞书内斜杠命令（`handlers` 表、`ADMIN_COMMANDS` 权限表） |

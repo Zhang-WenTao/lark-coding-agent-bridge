@@ -12,7 +12,7 @@ import {
 import {
   materializeEnvSecretForService,
   resolveProfileRuntime,
-} from '../../runtime/profile-runtime';
+} from '../../app/profile-runtime';
 import { readAndPrune, type ProcessEntry } from '../../runtime/registry';
 import { checkRuntimeLock, type RuntimeLockMeta } from '../../runtime/locks';
 import { preFlightChecks } from '../preflight';
