@@ -1905,6 +1905,46 @@ interface RunBatchDeps {
   profileDir?: string;
 }
 
+/**
+ * What `runAgentBatch` learns while its run goes on and reads again later:
+ * written by one part of it (the level pick, the session events, the reply
+ * delivery, a background turn) and read by another (the byline, the
+ * `finally` wrap-up). One object, so those parts can be functions of their own.
+ */
+interface BatchRunState {
+  /** 自动分级's pick, once startRunFlow asked for the level. */
+  autoPicked?: AutoEffortPick;
+  /**
+   * Assigned once the reply surface is set up. A background turn only
+   * arrives after this run's own reply, so it is always ready by then.
+   */
+  deliverBackgroundTurn?: BackgroundTurnHandler;
+  /** The conversation this run lands in — what an `[[NEW_SESSION]]` at its end closes. */
+  conversationHandle?: string;
+  /**
+   * The answer as the agent wrote it, before the prefs filter: a trailing
+   * `[[NEW_SESSION…]]` is read from it once the run is over.
+   */
+  lastRawState?: RunState;
+  /** A background turn already reported the work over (it can beat this run's own wrap-up). */
+  backgroundSettled: boolean;
+  /**
+   * Captured from whichever reply branch actually runs, so the `finally`
+   * block can decide whether to mark the triggering message "answered"
+   * without needing to know which reply mode produced the run.
+   */
+  runTerminal?: Terminal;
+  /** Why the run paused, and the card that says so — for the auto-resume. */
+  runLimit?: RunLimit;
+  runError?: string;
+  pausedCard?: { messageId: string; card: object };
+  /**
+   * Whether the answer went out as a message of its own (which pushes), as
+   * opposed to landing in the progress card that was created at the start.
+   */
+  answerIsNewMessage: boolean;
+}
+
 async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   const {
     channel,
@@ -2048,7 +2088,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
           },
         })
       : undefined;
-  let autoPicked: AutoEffortPick | undefined;
+  const run: BatchRunState = { backgroundSettled: false, answerIsNewMessage: false };
 
   // 群聊 / 话题上下文: Feishu only delivers the group messages that @ the bot,
   // so read back what was said around them — see chat-context.ts for which
@@ -2253,9 +2293,6 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   // Agents that post the answer as its own reply (see AgentDescriptor.finalReply)
   // treat the progress stream as best-effort: its failures are logged, not fatal.
   const separateFinalReply = capability.descriptor.finalReply === 'separate';
-  // Assigned once the reply surface below is set up. A background turn only
-  // arrives after this run's own reply, so it is always ready by then.
-  let deliverBackgroundTurn: BackgroundTurnHandler | undefined;
   // With approvals on, a batch carrying anyone's words but an admin's is
   // gated: the agent may read freely, but each side-effecting step waits
   // for an admin.
@@ -2322,12 +2359,12 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       : autoEffortPlan
       ? {
           pickLevel: async (resumeFrom: string | undefined) => {
-            autoPicked = await autoEffortPlan.pick(resumeFrom, executor.hasLiveProcess(scope));
-            return autoPicked ? { model: autoPicked.model, effort: autoPicked.effort } : undefined;
+            run.autoPicked = await autoEffortPlan.pick(resumeFrom, executor.hasLiveProcess(scope));
+            return run.autoPicked ? { model: run.autoPicked.model, effort: run.autoPicked.effort } : undefined;
           },
         }
       : {}),
-    onBackgroundTurn: (turn) => deliverBackgroundTurn?.(turn) ?? Promise.resolve(),
+    onBackgroundTurn: (turn) => run.deliverBackgroundTurn?.(turn) ?? Promise.resolve(),
     observability: {
       profile: controls.profile,
       agent: capability.agentId,
@@ -2408,9 +2445,9 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   }
   // The conversation this run lands in — what an `[[NEW_SESSION]]` at its end closes.
   const sessionHandleKey = capability.descriptor.sessionHandle;
-  let conversationHandle = flow.resumeFrom;
+  run.conversationHandle = flow.resumeFrom;
   const recordSession = (evt: AgentEvent): void => {
-    if (evt.type === 'system' && evt[sessionHandleKey]) conversationHandle = evt[sessionHandleKey];
+    if (evt.type === 'system' && evt[sessionHandleKey]) run.conversationHandle = evt[sessionHandleKey];
     recordRunSessionEvent({
       scopeId: scope,
       sessions,
@@ -2431,13 +2468,13 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     // an id this claude build/account doesn't recognize).
     if (evt.type === 'system' && evt.model) {
       log.info('session', 'model', {
-        requested: autoPicked?.model ?? requestedModel ?? 'default',
+        requested: run.autoPicked?.model ?? requestedModel ?? 'default',
         actual: evt.model,
       });
       // Same ground truth for the reader: the byline shows the concrete model
       // (e.g. Opus 5.5) instead of only the "always latest" alias picked in /config.
       if (cardRenderOptions.meta) {
-        cardRenderOptions.meta.model = resolvedModelLabel(agentKind, autoPicked?.model ?? modelPref, evt.model);
+        cardRenderOptions.meta.model = resolvedModelLabel(agentKind, run.autoPicked?.model ?? modelPref, evt.model);
       }
     }
     if (evt.type === 'system' && evt.threadId) {
@@ -2480,14 +2517,11 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     canAutoResume && state.terminal === 'paused' && state.limit
       ? { ...state, limit: { ...state.limit, autoResumeAt: resumeAtFor(state.limit) } }
       : state;
-  // So is a trailing `[[NEW_SESSION…]]`, read from `lastRawState` (the answer as
-  // the agent wrote it) once the run is over.
-  let lastRawState: RunState | undefined;
   // The bridge's own words on the reply follow the caller's language, the
   // same rule the agent gets for its answer (see detectLocale).
   const locale = detectLocale(batch.map((m) => m.content));
   const filterForPrefs = (raw: RunState): RunState => {
-    lastRawState = raw;
+    run.lastRawState = raw;
     // Group members can't open the owner's ledger path: hide the line there.
     const shown = mode === 'p2p' ? raw : withoutLedgerLines(raw);
     // English progress notes in a Chinese conversation: hidden, see the helper.
@@ -2504,9 +2538,9 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     meta: {
       title: channel.botIdentity?.name ?? controls.profile,
       agent: capability.agentId,
-      model: modelLabel(agentKind, autoPicked?.model ?? modelPref),
-      effort: autoPicked
-        ? autoEffortByline(autoPicked)
+      model: modelLabel(agentKind, run.autoPicked?.model ?? modelPref),
+      effort: run.autoPicked
+        ? autoEffortByline(run.autoPicked)
         : pinnedByline(resolveEffortArg(agentKind, effortPrefForChat(controls.profileConfig.preferences, chatId)), Boolean(modelPin)),
       provider: capability.descriptor.provider,
       ...(flow.rotated ? { notice: rotationNotice(flow.rotated) } : {}),
@@ -2559,12 +2593,9 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       longRunNoticeMs: getLongRunNoticeMs(controls.cfg),
     });
   };
-  // A background turn already reported the work over (it can beat this run's
-  // own wrap-up below).
-  let backgroundSettled = false;
   // Turns the agent runs on its own after this reply (a background task it
   // started reported back) go out as a follow-up reply to the same message.
-  deliverBackgroundTurn = async (turn) => {
+  run.deliverBackgroundTurn = async (turn) => {
     const state = backgroundTurnState(turn, filterForPrefs);
     if (state) {
       // The follow-up's byline reports the background turn's own consumption.
@@ -2588,14 +2619,14 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     if (smartSession && turn.kind === 'turn' && turn.background === 0) {
       const request = newSessionRequest(answerTextOf(finalizeIfRunning(turn.events.reduce(reduce, initialState))));
       if (request) {
-        pendingRotations.set(scope, { ...request, ...(conversationHandle ? { handle: conversationHandle } : {}) });
+        pendingRotations.set(scope, { ...request, ...(run.conversationHandle ? { handle: run.conversationHandle } : {}) });
         log.info('session', 'rotation-requested', { scope, hasSummary: Boolean(request.summary), via: 'background-turn' });
       }
     }
     if (turn.kind === 'turn' && turn.background > 0) return;
     // The work is over: this message's follow-up holds the result; any other
     // message still waiting on it is pointed here.
-    backgroundSettled = true;
+    run.backgroundSettled = true;
     await settleWaiting(turn.kind === 'stopped' ? 'stopped' : 'done');
   };
 
@@ -2607,18 +2638,6 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   // haven't opened the card. COT mode posts its own separate bubble, so it
   // stays excluded.
   const reactionPromise = cotEnabled ? undefined : addWorkingReaction(channel, lastMsg.messageId);
-
-  // Captured from whichever branch below actually runs, so the `finally`
-  // block can decide whether to mark the triggering message "answered"
-  // without needing to know which reply mode produced the run.
-  let runTerminal: Terminal | undefined;
-  // Why the run paused, and the card that says so — for the auto-resume.
-  let runLimit: RunLimit | undefined;
-  let runError: string | undefined;
-  let pausedCard: { messageId: string; card: object } | undefined;
-  // Whether the answer went out as a message of its own (which pushes), as
-  // opposed to landing in the progress card that was created at the start.
-  let answerIsNewMessage = false;
 
   // Only the progress card can take over a topic's opener card; any other reply leaves it the notice it stands for.
   if (cotEnabled || replyMode !== 'card') await releaseTopicOpener(channel, scope);
@@ -2651,9 +2670,9 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
           async () => {},
         );
         await cotDone;
-        runTerminal = finalState.terminal;
-        runLimit = finalState.limit;
-        runError = finalState.errorMsg;
+        run.runTerminal = finalState.terminal;
+        run.runLimit = finalState.limit;
+        run.runError = finalState.errorMsg;
         if (cotPublisher.degradedReason) {
           await sendCotDegradedNotice({
             channel,
@@ -2663,12 +2682,12 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
             reason: cotPublisher.degradedReason,
           });
         }
-        answerIsNewMessage = true;
+        run.answerIsNewMessage = true;
         await sendFinalReply({
           channel,
           chatId,
           scope,
-          state: finalAnswerOnlyState(stripControlMarkers((lastRawState = finalState))),
+          state: finalAnswerOnlyState(stripControlMarkers((run.lastRawState = finalState))),
           replyMode,
           sendOpts,
           cardRenderOptions,
@@ -2837,7 +2856,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       }
       await recallIfEmptyStreamedReply(channel, progress, filterForPrefs(latestState), scope);
       if (separateFinalReply) {
-        answerIsNewMessage = true;
+        run.answerIsNewMessage = true;
         await sendFinalReply({
           channel,
           chatId,
@@ -2862,11 +2881,11 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
           });
         }
       }
-      runTerminal = latestState.terminal;
-      runLimit = latestState.limit;
-      runError = latestState.errorMsg;
-      if (runTerminal === 'paused' && cardMessageId && lastLiveCard) {
-        pausedCard = { messageId: cardMessageId, card: lastLiveCard };
+      run.runTerminal = latestState.terminal;
+      run.runLimit = latestState.limit;
+      run.runError = latestState.errorMsg;
+      if (run.runTerminal === 'paused' && cardMessageId && lastLiveCard) {
+        run.pausedCard = { messageId: cardMessageId, card: lastLiveCard };
       }
     } else if (replyMode === 'markdown') {
       let latestState: RunState = initialState;
@@ -2932,7 +2951,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       }
       await recallIfEmptyStreamedReply(channel, progress, filterForPrefs(latestState), scope);
       if (separateFinalReply) {
-        answerIsNewMessage = true;
+        run.answerIsNewMessage = true;
         await sendFinalReply({
           channel,
           chatId,
@@ -2943,9 +2962,9 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
           cardRenderOptions,
         });
       }
-      runTerminal = latestState.terminal;
-      runLimit = latestState.limit;
-      runError = latestState.errorMsg;
+      run.runTerminal = latestState.terminal;
+      run.runLimit = latestState.limit;
+      run.runError = latestState.errorMsg;
     } else {
       // text mode: drain the agent stream without sending anything during
       // the run, then post the final rendered text once as a plain markdown
@@ -2958,7 +2977,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         recordSession,
         async () => {},
       );
-      answerIsNewMessage = true;
+      run.answerIsNewMessage = true;
       await sendFinalReply({
         channel,
         chatId,
@@ -2971,9 +2990,9 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         sendOpts,
         cardRenderOptions,
       });
-      runTerminal = finalState.terminal;
-      runLimit = finalState.limit;
-      runError = finalState.errorMsg;
+      run.runTerminal = finalState.terminal;
+      run.runLimit = finalState.limit;
+      run.runError = finalState.errorMsg;
     }
   } catch (err) {
     log.fail('stream', err);
@@ -2981,16 +3000,16 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     runs?.finish(execution.runId);
     activePolicyFingerprints.delete(scope);
     autoEffortPlan?.finish({
-      ...(conversationHandle ? { handle: conversationHandle } : {}),
-      ...(runTerminal ? { terminal: runTerminal } : {}),
+      ...(run.conversationHandle ? { handle: run.conversationHandle } : {}),
+      ...(run.runTerminal ? { terminal: run.runTerminal } : {}),
       durationMs: Date.now() - runSubmittedAt,
     });
     scheduleWorkingReactionCleanup(channel, lastMsg.messageId, reactionPromise);
     // Answered, but background tasks the agent started still run: the task
     // isn't over, so 「完成」 (reaction, long-run notice) waits for the
     // background turn that ends them — see deliverBackgroundTurn.
-    const background = backgroundSettled ? 0 : backgroundLeft(lastRawState);
-    if (runTerminal === 'done' && background > 0) {
+    const background = run.backgroundSettled ? 0 : backgroundLeft(run.lastRawState);
+    if (run.runTerminal === 'done' && background > 0) {
       backgroundOrigins.add(scope, {
         messageId: lastMsg.messageId,
         chatId,
@@ -3002,15 +3021,15 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         requesters: humanRequesters(batch),
       });
       log.info('run', 'done-deferred', { scope, background });
-    } else if (runTerminal === 'done' && waitingOrigins.length > 0) {
+    } else if (run.runTerminal === 'done' && waitingOrigins.length > 0) {
       // This turn ran in the process earlier messages' background work lived
       // in, and that work is over now — its reports were folded into this
       // turn (or it was stopped here): point those messages at this reply.
       void settleWaiting('done');
     }
-    if (runTerminal === 'done' && background === 0) void addDoneReaction(channel, lastMsg.messageId);
+    if (run.runTerminal === 'done' && background === 0) void addDoneReaction(channel, lastMsg.messageId);
     if (autoResumer) {
-      if (runTerminal === 'paused' && runLimit && canAutoResume) {
+      if (run.runTerminal === 'paused' && run.runLimit && canAutoResume) {
         void autoResumer.schedule({
           scope,
           chatId,
@@ -3020,24 +3039,24 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
           senderId: lastMsg.senderId,
           ...(lastMsg.senderName ? { senderName: lastMsg.senderName } : {}),
           originMessageId: lastMsg.messageId,
-          ...(pausedCard ? { cardMessageId: pausedCard.messageId, card: pausedCard.card } : {}),
-          resumeAt: resumeAtFor(runLimit),
-          ...(runLimit.limitType ? { limitType: runLimit.limitType } : {}),
+          ...(run.pausedCard ? { cardMessageId: run.pausedCard.messageId, card: run.pausedCard.card } : {}),
+          resumeAt: resumeAtFor(run.runLimit),
+          ...(run.runLimit.limitType ? { limitType: run.runLimit.limitType } : {}),
           locale,
           attempt: resumeAttempt,
           createdAt: Date.now(),
         });
-      } else if (runTerminal === 'paused') {
+      } else if (run.runTerminal === 'paused') {
         log.warn('auto-resume', 'gave-up', { scope, attempts: resumeAttempt - 1 });
-      } else if (runTerminal === 'done') {
+      } else if (run.runTerminal === 'done') {
         // A run that got through means the quota is back and someone is
         // steering this chat again; resuming on top of that would repeat work.
         void autoResumer.cancel(scope, 'run-completed');
       }
       // Killed from outside (or cut by a shutdown) halfway through a task that
       // keeps a ledger: pick it up again from the ledger, the owner's only.
-      const killed = runTerminal === 'error' && isKilledExit(runError);
-      const shutdown = runTerminal === 'interrupted' && handle.stopCause === 'shutdown';
+      const killed = run.runTerminal === 'error' && isKilledExit(run.runError);
+      const shutdown = run.runTerminal === 'interrupted' && handle.stopCause === 'shutdown';
       if (ownerRun && handle.ledger && (killed || shutdown)) {
         if (resumeAttempt > MAX_INTERRUPT_RESUMES) {
           log.warn('auto-resume', 'interrupt-gave-up', { scope, attempts: resumeAttempt - 1 });
@@ -3069,23 +3088,23 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         }
       }
     }
-    const longRunNotice = runTerminal === 'done' && background > 0 ? undefined : planLongRunNotice({
+    const longRunNotice = run.runTerminal === 'done' && background > 0 ? undefined : planLongRunNotice({
       thresholdMs: getLongRunNoticeMs(controls.cfg),
       elapsedMs: Date.now() - runSubmittedAt,
-      terminal: runTerminal,
+      terminal: run.runTerminal,
       p2p: mode === 'p2p',
-      answerIsNewMessage,
+      answerIsNewMessage: run.answerIsNewMessage,
       requesters: humanRequesters(batch),
     });
     if (longRunNotice) void sendLongRunNotice(channel, chatId, longRunNotice, sendOpts, scope);
-    if (smartSession && runTerminal === 'done') {
-      const request = newSessionRequest(answerTextOf(lastRawState));
+    if (smartSession && run.runTerminal === 'done') {
+      const request = newSessionRequest(answerTextOf(run.lastRawState));
       if (request && background > 0) {
         // Work still running isn't a finished task: closing the conversation
         // now would cut it off from its own results.
         log.info('session', 'rotation-request-ignored', { scope, background });
       } else if (request) {
-        pendingRotations.set(scope, { ...request, ...(conversationHandle ? { handle: conversationHandle } : {}) });
+        pendingRotations.set(scope, { ...request, ...(run.conversationHandle ? { handle: run.conversationHandle } : {}) });
         log.info('session', 'rotation-requested', { scope, hasSummary: Boolean(request.summary) });
       }
     }
