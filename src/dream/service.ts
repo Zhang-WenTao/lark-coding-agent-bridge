@@ -5,9 +5,6 @@ import { agentCapability } from '../agent/capability';
 import { resolveEffortArg, resolveModelArg } from '../agent/models';
 import {
   accountRoomUnderCap,
-  fullestQuotaWindow,
-  quotaResetAt,
-  readAgentQuota,
   type AccountLineCap,
   type QuotaReading,
 } from '../agent/quota';
@@ -40,24 +37,14 @@ import {
   type ExternalCursor,
   type ExternalMaterial,
 } from './external';
-import {
-  applyMemoryPlan,
-  buildMemoryPrompt,
-  memoryPlanSummary,
-  memoryPrBody,
-  memoryPrTitle,
-  memoryWorthConsolidating,
-  parseMemoryOps,
-  readMemoryFiles,
-  readPendingFlags,
-} from './consolidate';
-import { ARCHIVE_DAYS, archiveChangelogLines, archiveNotes, MAX_ARCHIVE, observeNotes } from './archive';
-import { diaryEntry, diaryWorthWriting, writeDiary, type DiaryInput } from './diary';
-import { runDigest } from './global-digest';
-import { DIGEST_MANIFEST, digestView, isDigestScope, parseManifest } from '../knowledge/digest';
-import { sanitizeScopeId } from '../knowledge/store';
+import { type DiaryInput } from './diary';
+import { } from './global-digest';
+import { } from '../knowledge/store';
+import { holdBack, quotaGate, runAutoCheck, type AutoGateHost } from './auto-gate';
+import { deepSleep, type DeepSleepHost } from './deep-sleep';
+import { baseRepo } from './util';
 import { ACCOUNTS_FULL_REASON, nextDrainRound } from './drain';
-import { formatDreamRun } from './format';
+import { } from './format';
 import { formatAfterRun, runAfterAutoCommands } from './after-run';
 import { acquireDreamLocks, type HeldDreamLocks } from './lock';
 import { buildDreamScopePrompt, buildExternalLearningPrompt } from './prompt';
@@ -96,7 +83,6 @@ import {
 import {
   changelogEntry,
   commitMessage,
-  deepChangelogEntry,
   flagLine,
   knowledgePrBody,
   knowledgePrTitle,
@@ -107,17 +93,12 @@ import {
   type SessionLegend,
 } from './report';
 import {
-  cheapDreamGate,
-  dreamWindowAt,
-  localTimeToday,
-  materialGate,
   msUntilDaily,
   type DreamAutoCheck,
   type DreamAutoLedger,
 } from './schedule';
 import { excludedTerm } from './exclude';
-import { measureNewInput, selectDreamInputs, type DreamScopeInput } from './select';
-import type { DreamMaterial } from './schedule';
+import { selectDreamInputs, type DreamScopeInput } from './select';
 import { DreamStateStore, sessionKey, type DreamRun, type DreamSessionRecord, type DreamTarget } from './state';
 
 /**
@@ -318,18 +299,11 @@ const MAX_LEARNING_SKILLS = 10;
 const MAX_OWN_SKILL_CHARS = 20_000;
 const AUTO_CHECK_MS = 30 * 60_000;
 const WATCHDOG_MS = 15_000;
-const UNKNOWN_QUOTA_BUDGET = 0.5;
 /** Recall window the notes index is ranked by. */
 const NOTE_RANK_DAYS = 30;
 /** The diary's most read notes / skills: the last week. */
 const DIARY_TOP_DAYS = 7;
 const AUTO_ACTOR: DreamActor = { id: 'dream-auto', name: '自动整理' };
-/** 深睡整理's direct target in the knowledge repository: diary, notes consolidation, archive. */
-const DEEP_REPO = 'knowledge:deep';
-/** 深睡·记忆整合: always a Draft PR of its own. */
-const MEMORY_REPO = 'knowledge:memory';
-/** Between two 记忆整合 PRs, so a rejected one is not proposed again the next night. */
-const MEMORY_COOLDOWN_MS = 3 * 86_400_000;
 /** Deferral reason of the conversations an automatic run left to a user task. */
 export const YIELD_REASON = '让位给用户任务';
 
@@ -352,12 +326,41 @@ export class DreamService {
   private disposed = false;
   /** Local day (YYYY-MM-DD) the `afterAutoRun` commands last ran; once a day is enough. */
   private afterRunDay: string | undefined;
+  private readonly gateHost: AutoGateHost;
+  private readonly deepSleepHost: DeepSleepHost;
 
   constructor(private readonly deps: DreamServiceDeps) {
     this.state = new DreamStateStore(deps.stateFile);
     this.recall = new RecallStore(deps.recallFile ?? join(dirname(deps.stateFile), 'dream-recall.json'));
     this.pool = new CandidatePool(deps.poolFile ?? join(dirname(deps.stateFile), 'dream-pool.json'));
     this.now = deps.now ?? Date.now;
+    this.deepSleepHost = {
+      deps,
+      state: this.state,
+      recall: this.recall,
+      now: () => this.now(),
+      runAgent: (scopeId, prompt, actor, timeoutMs, signal) => this.runAgent(scopeId, prompt, actor, timeoutMs, signal),
+      commitTarget: (id, target, files, summary) => this.commitTarget(id, target, files, summary),
+      pushAndOpen: (id, target) => this.pushAndOpen(id, target),
+      saveTarget: (id, target) => this.saveTarget(id, target),
+    };
+    this.gateHost = {
+      deps,
+      state: this.state,
+      now: () => this.now(),
+      enabled: () => this.enabled(),
+      runInFlight: () => Boolean(this.current || this.starting),
+      setLastCheck: (check) => {
+        this.lastCheck = check;
+      },
+      repoTargets: (url) => this.repoTargets(url),
+      readOnlyAllowed: () => Boolean(this.readOnlyPolicy('自动整理预检', AUTO_ACTOR, this.deps.workDir)),
+      noteCatalog: () => this.noteCatalog(),
+      reader: () => this.reader(),
+      tell: (chatId, text) => this.tell(chatId, text),
+      afterAutoChain: (reason) => this.afterAutoChain(reason),
+      startAuto: (onFinish, options) => this.start(AUTO_ACTOR, onFinish, options),
+    };
   }
 
   async init(): Promise<void> {
@@ -679,124 +682,12 @@ export class DreamService {
 
   // ---------------------------------------------------------------------------
 
-  private async runAutoCheck(): Promise<DreamAutoCheck> {
-    const now = this.now();
-    const settings = getDreamAuto(this.deps.appConfig());
-    if (!settings) {
-      return this.noteCheck({ at: now, block: 'off', reason: this.enabled() ? '自动整理没有打开' : '课堂精练没有打开' });
-    }
-    const auto = settings.auto;
-    if (this.current || this.starting) return this.noteCheck({ at: now, block: 'running', reason: '已经有一轮整理在进行' });
-    const cheap = cheapDreamGate({ now, auto, ledger: this.state.autoLedger() });
-    // 续跑: the last run left work behind (its chain was cut short by a user
-    // task, a restart or the quota) — finish it once the profile is idle,
-    // inside the window or not.
-    const resume =
-      cheap && (cheap.block === 'window-used' || cheap.block === 'outside-window') ? this.pendingDrain(settings.drainRounds) : undefined;
-    if (cheap && !resume) return this.noteCheck({ at: now, ...cheap });
-    const held = this.holdBack();
-    if (held.block) return this.noteCheck({ at: now, block: 'busy', reason: held.reason });
-    const lastActive = this.state.sessions().reduce((latest, record) => Math.max(latest, record.lastSeenAt), 0);
-    // Going by the pool, a conversation still going on is skipped on its own (仍在进行); the rest need not wait for it.
-    if (!this.deps.isCapacityTight && now - lastActive < settings.minIdleMinutes * 60_000) {
-      return this.noteCheck({ at: now, block: 'recent-activity', reason: `最近 ${settings.minIdleMinutes} 分钟内有对话，等空闲后再看` });
-    }
-    const url = await knowledgeRemoteUrl(this.deps.knowledge).catch(() => undefined);
-    if (!url) return this.noteCheck({ at: now, block: 'no-remote', reason: '知识库没有绑定远端（/knowledge bind）' });
-    if (!this.readOnlyPolicy('自动整理预检', AUTO_ACTOR, this.deps.workDir)) {
-      return this.noteCheck({ at: now, block: 'restricted', reason: '当前 agent 配置无法保证只读执行，不开放自动整理' });
-    }
-    this.noteCatalog();
-    // 每日模式 runs whatever piled up — 课前学习 and own skills count as much as conversations.
-    let material: DreamMaterial | undefined;
-    if (!auto.daily && !resume) {
-      const measured = await measureNewInput({ records: this.state.sessions(), settings, read: this.reader() });
-      const counted = { scopes: measured.scopes, sessions: measured.sessions, chars: measured.chars };
-      const gate = materialGate({ now, auto, material: counted, since: this.state.autoLedger().lastCompletedAt ?? measured.oldestAt });
-      if (!gate.ok) return this.noteCheck({ at: now, block: 'material', reason: gate.reason, material: counted });
-      material = gate.material;
-    }
-    // Pushed straight to the default branch, nothing waits for review.
-    const openPrs = settings.publish === 'push' ? 0 : await this.openDreamPrs(url);
-    if (openPrs >= auto.maxOpenPrs) {
-      return this.noteCheck({
-        at: now,
-        block: 'backlog',
-        reason: `待审积压：还有 ${openPrs} 个课堂精练 Draft PR 没合并或关闭（上限 ${auto.maxOpenPrs}），暂停自动整理`,
-        ...(material ? { material } : {}),
-        openPrs,
-      });
-    }
-    const { quota, lead: quotaLead, block: quotaBlock } = await this.quotaGate(auto, now);
-    const context = { ...(material ? { material } : {}), openPrs, quota };
-    if (quotaBlock && resume) return this.noteCheck({ at: now, block: 'quota', reason: `续跑暂停：${quotaBlock}`, ...context });
-    const lead = resume ? resume.note : quotaLead;
-    if (quotaBlock) {
-      const reason = quotaBlock;
-      if (auto.daily) {
-        // The weekly window will not empty within the hours left: today is skipped, once, and said so.
-        this.state.updateAuto({ lastWindowKey: dreamWindowAt(now, auto.window, auto.timezone).key });
-        this.tell(settings.notifyChat, `**📚 今天的课堂精练跳过**\n\n${reason}，明天 ${auto.daily.text} 再看。`);
-        this.afterAutoChain('今天的课堂精练跳过');
-      }
-      return this.noteCheck({ at: now, block: 'quota', reason, ...context });
-    }
-    // The checks above took a while: a user may have shown up meanwhile.
-    const heldLate = this.holdBack();
-    if (heldLate.block) return this.noteCheck({ at: now, block: 'busy', reason: heldLate.reason, ...context });
-    const notifyChat = settings.notifyChat;
-    const started = await this.start(AUTO_ACTOR, notifyChat ? (run) => this.tell(notifyChat, formatDreamRun(run)) : undefined, {
-      trigger: 'auto',
-      budget: 'unknown' in quota ? UNKNOWN_QUOTA_BUDGET : 1,
-      ...(lead ? { note: lead } : {}),
-      ...(resume ? { round: resume.round } : {}),
-      // Over the limit but the window resets before quotaResetBefore: what is
-      // left would go unused anyway, so no account is held back either.
-      ...(quotaLead ? {} : { accountLineCap: autoLineCap(auto) }),
-    });
-    if ('error' in started) {
-      return this.noteCheck({ at: now, block: started.code === 'locked' ? 'locked' : 'running', reason: started.error, ...context });
-    }
-    // A 续跑 outside the window must not use up the next one.
-    if (!resume) this.state.updateAuto({ lastWindowKey: dreamWindowAt(now, auto.window, auto.timezone).key });
-    return this.noteCheck({ at: now, started: started.run.id, ...context });
+  private runAutoCheck(): Promise<DreamAutoCheck> {
+    return runAutoCheck(this.gateHost);
   }
 
-  /**
-   * 额度: over `maxQuotaPercent` blocks, unless the window resets today before
-   * `quotaResetBefore` — whatever is left would go away at the reset anyway.
-   */
-  private async quotaGate(
-    auto: DreamAutoSettings,
-    now: number,
-  ): Promise<{ quota: Awaited<ReturnType<DreamService['readQuota']>>; lead?: string; block?: string }> {
-    const quota = await this.readQuota(auto.quotaWindow);
-    if (!('percent' in quota) || quota.percent < auto.maxQuotaPercent) return { quota };
-    const resetAt = quotaResetAt(quota.resets, now);
-    const before = auto.quotaResetBefore;
-    if (resetAt !== undefined && before && resetAt > now && resetAt <= localTimeToday(now, before.at, auto.timezone)) {
-      return { quota, lead: `${quota.label}额度已用 ${quota.percent}%，但今天 ${before.text} 前就重置，照常整理` };
-    }
-    return { quota, block: `额度已用 ${quota.percent}%（${quota.label}），到了 ${auto.maxQuotaPercent}% 的上限` };
-  }
-
-  /**
-   * The 续跑 the latest run calls for, if any. Runs cut off before their
-   * checkpoint by a user task, a restart or a shutdown consumed nothing: the
-   * one before them still says what is left. A run cancelled by hand ends it.
-   */
-  private pendingDrain(maxRounds: number): { round: number; note: string } | undefined {
-    const runs = this.state.runs();
-    for (let i = runs.length - 1; i >= 0; i--) {
-      const run = runs[i]!;
-      const interrupted =
-        run.checkpointAt === undefined &&
-        (run.yielded === true ||
-          (run.status === 'cancelled' && !(run.note ?? '').startsWith('已取消')) ||
-          (run.status === 'failed' && (run.note ?? '').startsWith('进程重启时中断')));
-      if (!interrupted) return nextDrainRound(run, maxRounds);
-    }
-    return undefined;
+  private quotaGate(auto: DreamAutoSettings, now: number): ReturnType<typeof quotaGate> {
+    return quotaGate(this.deps, auto, now);
   }
 
   /**
@@ -825,40 +716,8 @@ export class DreamService {
     if ('error' in started) log.info('dream', 'drain-not-started', { after: run.id, reason: started.error });
   }
 
-  /** Automatic runs must hold back: slots are short, or (without a pool to go by) anything else runs. */
   private holdBack(): { block: boolean; reason: string } {
-    if (this.deps.isCapacityTight) {
-      return { block: this.deps.isCapacityTight(), reason: '进程池已满、有用户任务在等位，用户任务优先' };
-    }
-    return { block: this.deps.isProfileBusy?.() ?? false, reason: '有任务在跑或有消息在排队，用户任务优先' };
-  }
-
-  /** Keep the latest check; the stored one is rewritten only when the outcome changes. */
-  private noteCheck(check: DreamAutoCheck): DreamAutoCheck {
-    this.lastCheck = check;
-    // A switched-off or busy-running profile gets no state file writes for it.
-    if (check.block === 'off' || check.block === 'running') return check;
-    const stored = this.state.autoLedger().lastCheck;
-    if (check.started || !stored || stored.block !== check.block || stored.reason !== check.reason) {
-      this.state.updateAuto({ lastCheck: check });
-    }
-    return check;
-  }
-
-  private async openDreamPrs(knowledgeUrl: string): Promise<number> {
-    const count = this.deps.countOpenPrs ?? ((url: string) => countOpenDreamPullRequests(this.deps.workDir, url));
-    const runs = this.state.runs();
-    let worst = 0;
-    for (const repo of this.repoTargets(knowledgeUrl)) {
-      const live = await count(repo.url).catch(() => undefined);
-      // Drafts of ours still waiting to be pushed / opened are part of the
-      // backlog too — and all there is to go on when `gh` cannot answer.
-      const waiting = runs
-        .flatMap((run) => run.targets)
-        .filter((target) => baseRepo(target.repo) === repo.repo && (target.phase === 'committed' || target.phase === 'pushed')).length;
-      worst = Math.max(worst, (live ?? 0) + waiting);
-    }
-    return worst;
+    return holdBack(this.deps);
   }
 
   /**
@@ -890,31 +749,6 @@ export class DreamService {
   private async accountHasRoom(cap: AccountLineCap): Promise<boolean | undefined> {
     if (this.deps.accountRoom) return this.deps.accountRoom(cap).catch(() => undefined);
     return accountRoomUnderCap(this.deps.profileConfig(), this.deps.profileDir, cap);
-  }
-
-  private async readQuota(
-    window: 'any' | 'week' = 'any',
-  ): Promise<{ percent: number; label: string; resets?: string } | { unknown: true }> {
-    const read =
-      this.deps.readQuota ??
-      (async () => {
-        const cwd = join(this.deps.workDir, 'scratch');
-        await mkdir(cwd, { recursive: true, mode: 0o700 });
-        return readAgentQuota(this.deps.profileConfig(), {
-          cwd,
-          ...(this.deps.profileDir ? { profileDir: this.deps.profileDir } : {}),
-          window,
-        });
-      });
-    const reading = await read().catch(() => undefined);
-    const chosen = !reading
-      ? undefined
-      : window === 'week' && !reading.blocked
-        ? reading.windows.find((item) => item.label === '本周')
-        : fullestQuotaWindow(reading);
-    return chosen
-      ? { percent: Math.round(chosen.usedPercent), label: chosen.label, ...(chosen.resets ? { resets: chosen.resets } : {}) }
-      : { unknown: true };
   }
 
   /** While an automatic batch drafts, it gives way when user work needs room (see {@link holdBack}). */
@@ -1759,204 +1593,13 @@ export class DreamService {
     return { blocked: false, published };
   }
 
-  /**
-   * 深睡整理, once the night's input is checkpointed and published: 记忆整合
-   * as a Draft PR of its own; then, straight onto the default branch, 笔记整合,
-   * 归档 and the diary entry at the top of DREAMS.md. The diary is also kept with
-   * the run. Nothing here moves a cursor; a failure is reported and looked at
-   * again another night. Returns a line for the run's summary, if any.
-   */
-  private async deepSleep(
+  private deepSleep(
     id: string,
     settings: DreamSettings,
     ctx: { actor: DreamActor; deadline: number; signal: AbortSignal; yielding?: boolean; noteScopes: readonly string[] },
     diary: DiaryInput,
   ): Promise<string | undefined> {
-    const { signal } = ctx;
-    const url = await knowledgeRemoteUrl(this.deps.knowledge).catch(() => undefined);
-    const notes: string[] = [];
-    const done = () => {
-      this.state.updateRun(id, { diary: diaryEntry(diary) });
-      return notes.join('；') || undefined;
-    };
-    // Agent turns only when the run has time left and nobody is waiting for a slot.
-    const awake = settings.deepSleep && url && !signal.aborted && !ctx.yielding;
-    if (awake) {
-      const consolidation = await this.consolidateMemory(id, url, ctx);
-      if (consolidation) {
-        diary.deep.consolidation = consolidation;
-        if (consolidation.error) notes.push(`记忆整合没做成：${consolidation.error}`);
-        else if (consolidation.prUrl) notes.push(`记忆整合 Draft PR：${consolidation.prUrl}`);
-      }
-    }
-    // With publish: pr the notes being merged are the ones tonight's unmerged PR
-    // appends to, and a Draft PR for nothing but the diary is noise: the diary
-    // stays in the run record.
-    if (signal.aborted || settings.publish !== 'push' || !url) return done();
-    const archivable = awake ? this.recall.archivable(ARCHIVE_DAYS, this.now(), diary.timezone, MAX_ARCHIVE) : [];
-    if (!diaryWorthWriting(diary) && !awake && archivable.length === 0) return done();
-    let target: DreamTarget = { repo: DEEP_REPO, label: '知识库（深睡整理）', branch: dreamBranch(id), phase: 'failed', items: 0, direct: true };
-    const dir = join(this.deps.workDir, 'batches', id, 'deep');
-    const prepared = await prepareCheckout({ repo: DEEP_REPO, label: target.label, url }, dir, target.branch, { direct: true });
-    if ('error' in prepared) {
-      this.saveTarget(id, { ...target, error: prepared.error });
-      notes.push(`深睡整理没做成：${prepared.error}`);
-      return done();
-    }
-    target = { ...target, branch: prepared.base, base: prepared.base, checkoutDir: dir };
-    const files: string[] = [];
-    const logLines: string[] = [];
-    // 全局整合 replaces the per-chat merge: raw notes stay as written, the layer is rebuilt from what changed.
-    if (awake) {
-      const digested = await this.digestNotes(id, dir, ctx);
-      if (digested) {
-        diary.deep.notesMerge = digested.summary;
-        files.push(...digested.files);
-        logLines.push(...digested.lines);
-        if (digested.summary.error) notes.push(`全局整合有部分没做成：${digested.summary.error}`);
-      }
-    }
-    // 归档 after the merges (a merged note changed tonight, a folded one is
-    // gone), and observed before it: should the push fail, the notes are
-    // still known and come up again tomorrow.
-    const now = this.now();
-    this.recall.observeNotes(await observeNotes(dir), now);
-    if (awake) {
-      // The layer and the raw notes it was folded from stay: the layer is what gets read now, the raw notes are its sources.
-      const digest = digestView(parseManifest(await readFile(join(dir, ...DIGEST_MANIFEST.split('/')), 'utf8').catch(() => undefined)));
-      const keys = this.recall
-        .archivable(ARCHIVE_DAYS, now, diary.timezone, MAX_ARCHIVE * 5)
-        .filter((key) => {
-          const name = key.replace(/^note:/, '');
-          return !isDigestScope(name.split('/')[0] ?? '') && !digest.covered.has(name);
-        })
-        .slice(0, MAX_ARCHIVE);
-      const archived = await archiveNotes(dir, keys);
-      if (archived.moved.length > 0) {
-        diary.deep.archived = archived.moved.length;
-        files.push(...archived.files);
-        logLines.push(...archiveChangelogLines(archived.moved));
-      }
-    }
-    if (files.length === 0 && !diaryWorthWriting(diary)) return done();
-    const written = await writeDiary(dir, diaryEntry(diary));
-    if ('error' in written) notes.push(`梦境日记没写成：${written.error}`);
-    else files.push(written.file);
-    if (logLines.length > 0) {
-      const logged = await writeChangelog(dir, deepChangelogEntry({ batchId: id, at: this.now(), timezone: diary.timezone, lines: logLines }));
-      if ('file' in logged) files.push(logged.file);
-    }
-    if (files.length === 0) return done();
-    const parts = [
-      diary.deep.notesMerge?.notes ? `全局整合 ${diary.deep.notesMerge.notes} 篇笔记进 ${diary.deep.notesMerge.into} 个主题` : undefined,
-      diary.deep.archived ? `归档 ${diary.deep.archived} 篇` : undefined,
-      'file' in written ? '梦境日记' : undefined,
-    ].filter(Boolean);
-    const items = (diary.deep.notesMerge?.into ?? 0) + (diary.deep.archived ?? 0);
-    const committed = await this.commitTarget(id, { ...target, items }, files, `深睡整理：${parts.join('、')}`);
-    if (committed.phase !== 'committed') notes.push(`深睡整理没提交成：${committed.error ?? '提交失败'}`);
-    else {
-      const pushed = await this.pushAndOpen(id, committed);
-      if (pushed.phase !== 'published') {
-        // Merges made on a stale base are not worth a retry: the next night looks again.
-        if (pushed.phase === 'committed') this.saveTarget(id, { ...pushed, phase: 'failed' });
-        notes.push(`深睡整理没推成：${pushed.error ?? '推送失败'}`);
-      }
-    }
-    return done();
-  }
-
-  /**
-   * 深睡·全局整合: what changed in the raw notes since the manifest, folded
-   * into the knowledge layer (see `./global-digest`). Only once the layer
-   * exists: the first, full build is reviewed by hand as a PR of its own.
-   */
-  private async digestNotes(
-    id: string,
-    dir: string,
-    ctx: { actor: DreamActor; deadline: number; signal: AbortSignal },
-  ): Promise<{ summary: NonNullable<DiaryInput['deep']['notesMerge']>; files: string[]; lines: string[] } | undefined> {
-    if (ctx.deadline - this.now() <= 0 || ctx.signal.aborted) return undefined;
-    const manifest = await readFile(join(dir, ...DIGEST_MANIFEST.split('/')), 'utf8').catch(() => undefined);
-    if (manifest === undefined) return undefined;
-    const restricted = new Set(Object.keys(this.deps.profileConfig().access.restrictedChats ?? {}).map(sanitizeScopeId));
-    const result = await runDigest({
-      dir,
-      restricted,
-      now: this.now(),
-      deadline: ctx.deadline,
-      run: (key, prompt) => this.runAgent(`dream:${id}:digest-${key}`, prompt, ctx.actor, Math.max(0, ctx.deadline - this.now()), ctx.signal),
-    });
-    if (result.errors.length > 0) log.warn('dream', 'digest-errors', { batch: id, errors: result.errors.slice(0, 20) });
-    if (result.files.length === 0 && result.errors.length === 0) return undefined;
-    return {
-      summary: {
-        notes: result.notes,
-        into: result.topics,
-        lifted: result.newTopics,
-        dropped: result.dropped,
-        ...(result.errors.length > 0 ? { error: `${result.errors.length} 处没通过（${result.errors[0]}${result.errors.length > 1 ? ' 等' : ''}），次晚重试` } : {}),
-      },
-      files: result.files,
-      lines: result.changelog,
-    };
-  }
-
-  /**
-   * 深睡·记忆整合: one turn over the pending flags (and a global memory near
-   * its budget), checked operation by operation, as a Draft PR of its own.
-   * One at a time: while the last one waits for review, or within a few days
-   * of it, nothing new is proposed. Undefined when there was nothing to do.
-   */
-  private async consolidateMemory(
-    id: string,
-    url: string,
-    ctx: { actor: DreamActor; deadline: number; signal: AbortSignal },
-  ): Promise<NonNullable<DiaryInput['deep']['consolidation']> | undefined> {
-    const none = { updated: 0, merged: 0, deleted: 0, dismissed: 0 };
-    const earlier = this.state
-      .runs()
-      .filter((run) => run.id !== id)
-      .flatMap((run) => run.targets.filter((target) => target.repo === MEMORY_REPO).map((target) => ({ run, target })));
-    for (const { target } of earlier) {
-      if (target.phase === 'committed' || target.phase === 'pushed') return { ...none, skipped: '上一份记忆整合还没开成 PR' };
-      if (target.phase === 'pr-created' && target.prUrl) {
-        const state = await pullRequestState(this.deps.workDir, target.prUrl);
-        if (state !== '已合并' && state !== '已关闭') return { ...none, skipped: `上一份记忆整合 PR 还没审完（${target.prUrl}）` };
-      }
-    }
-    if (earlier.some(({ run }) => this.now() - run.startedAt < MEMORY_COOLDOWN_MS)) return undefined;
-
-    const label = '知识库（记忆整合）';
-    let target: DreamTarget = { repo: MEMORY_REPO, label, branch: `${dreamBranch(id)}-memory`, phase: 'failed', items: 0 };
-    const dir = join(this.deps.workDir, 'batches', id, 'memory');
-    const prepared = await prepareCheckout({ repo: MEMORY_REPO, label, url }, dir, target.branch);
-    if ('error' in prepared) return { ...none, error: prepared.error };
-    const flags = await readPendingFlags(dir);
-    const files = await readMemoryFiles(dir, flags);
-    if (!memoryWorthConsolidating(flags, files)) return undefined;
-    const remaining = ctx.deadline - this.now();
-    if (remaining <= 0) return { ...none, skipped: '超出本轮运行时间' };
-    const answer = await this.runAgent(`dream:${id}:memory`, buildMemoryPrompt({ flags, files }), ctx.actor, remaining, ctx.signal);
-    if ('error' in answer) return { ...none, error: answer.error };
-    const plan = parseMemoryOps(answer.text, { flags, files });
-    if ('error' in plan) return { ...none, error: `模型输出不合格：${plan.error}` };
-    const summary = memoryPlanSummary(plan);
-    if (plan.ops.length === 0) return { ...summary, skipped: plan.rejected.length > 0 ? `提出的 ${plan.rejected.length} 个操作都没通过校验` : '没有需要改的' };
-    const changed = await applyMemoryPlan(dir, plan, { flags, files });
-    target = {
-      ...target,
-      base: prepared.base,
-      checkoutDir: dir,
-      items: plan.ops.length,
-      title: memoryPrTitle(id, plan),
-      body: memoryPrBody({ batchId: id, profile: this.deps.profile, plan, files, flags }),
-    };
-    const committed = await this.commitTarget(id, target, changed, `记忆整合：改写 ${summary.updated}、合并 ${summary.merged}、删除 ${summary.deleted}、关闭标记 ${summary.dismissed}`);
-    if (committed.phase !== 'committed') return { ...summary, error: committed.error ?? '提交失败' };
-    const opened = await this.pushAndOpen(id, committed);
-    if (!opened.prUrl) return { ...summary, error: opened.error ?? '没开成 PR，下一轮重试' };
-    return { ...summary, prUrl: opened.prUrl };
+    return deepSleep(this.deepSleepHost, id, settings, ctx, diary);
   }
 
   private async commitTarget(id: string, target: DreamTarget, files: string[], summary: string): Promise<DreamTarget> {
@@ -2175,13 +1818,7 @@ export class DreamService {
   }
 }
 
-/**
- * The repository a target writes to: a batch may have several targets in one
- * repository (`knowledge:deep`, `skills:<lib>:update`), each under its own key.
- */
-export function baseRepo(repo: string): string {
-  return repo === 'knowledge' || repo.startsWith('knowledge:') ? 'knowledge' : repo.replace(/:update$/, '');
-}
+export { baseRepo };
 
 /** The run limits scaled down to a share; never below one session / one minute. */
 function scaleBudget(settings: DreamSettings, budget: number): DreamSettings {
@@ -2267,13 +1904,3 @@ function batchId(now: number): string {
 }
 
 export { sessionKey };
-
-/**
- * 自动整理's ceiling as a per-window cap: the weekly window only, or both
- * when `quotaWindow` is `any`.
- */
-function autoLineCap(auto: { maxQuotaPercent: number; quotaWindow: 'any' | 'week' }): AccountLineCap {
-  return auto.quotaWindow === 'week'
-    ? { seven_day: auto.maxQuotaPercent }
-    : { five_hour: auto.maxQuotaPercent, seven_day: auto.maxQuotaPercent };
-}

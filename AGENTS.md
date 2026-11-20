@@ -52,7 +52,7 @@
 | `src/policy/` | 访问控制（owner / admin / 名单）、run 策略、策略指纹 |
 | `src/config/` | profile schema v2、root config 存取、keystore、v1→v2 迁移 |
 | `src/scheduler/`、`src/meeting/`、`src/knowledge/` | 定时任务、会议机器人、跨会话记忆与 skill |
-| `src/dream/` | 梦境整理：会话游标账本、输入选择、提案校验、草稿发布（Draft PR）、自动整理门槛、跨 profile 仓库锁 |
+| `src/dream/` | 梦境整理：会话游标账本、输入选择、提案校验、草稿发布（Draft PR）、自动整理门槛（`auto-gate.ts`）、深睡（`deep-sleep.ts`）、跨 profile 仓库锁 |
 | `src/lark-cli/` | 每个 profile 私有的 lark-cli 配置投影与身份策略 |
 | `src/ui/` + `web/` | Web 控制台 API（`src/ui`）与 React SPA（`web/`，`pnpm build:web` 产物内联进 `src/ui/generated/`，已 gitignore） |
 | `src/daemon/` | launchd / systemd / schtasks 服务定义 |
