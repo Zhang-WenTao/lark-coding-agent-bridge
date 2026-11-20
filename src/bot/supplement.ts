@@ -1,4 +1,4 @@
-import type { SupplementTarget } from './active-runs';
+import type { SupplementTarget } from '../runtime/active-runs';
 import { mediaPlaceholders } from './media-placeholders';
 
 /**

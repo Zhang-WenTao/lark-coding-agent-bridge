@@ -5,8 +5,8 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { BACKGROUND_FAILOVER_PROMPT, runWithAccountFailover } from '../../../src/agent/claude/account-failover';
 import { claudeAccountsPaths, ClaudeAccountPool, type PickedAccount } from '../../../src/agent/claude/accounts';
 import type { AgentAdapter, AgentEvent, AgentRun, AgentRunOptions } from '../../../src/agent/types';
-import { ActiveRuns } from '../../../src/bot/active-runs';
-import { ProcessPool } from '../../../src/bot/process-pool';
+import { ActiveRuns } from '../../../src/runtime/active-runs';
+import { ProcessPool } from '../../../src/runtime/process-pool';
 import type { RunPolicyAllow } from '../../../src/policy/run-policy';
 import { RunExecutor, type BackgroundTurn } from '../../../src/runtime/run-executor';
 

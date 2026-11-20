@@ -1,7 +1,7 @@
 import type { NormalizedMessage } from '@larksuite/channel';
 import { describe, expect, it, vi } from 'vitest';
 import type { AgentRun } from '../../../src/agent/types';
-import { ActiveRuns } from '../../../src/bot/active-runs';
+import { ActiveRuns } from '../../../src/runtime/active-runs';
 import {
   EditedMessages,
   editInstruction,

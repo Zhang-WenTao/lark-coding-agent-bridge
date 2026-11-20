@@ -1,11 +1,11 @@
 import type { CardActionEvent } from '@larksuite/channel';
 import { afterEach, describe, expect, it } from 'vitest';
-import { ActiveRuns } from '../../../src/bot/active-runs.js';
+import { ActiveRuns } from '../../../src/runtime/active-runs.js';
 import type { ChatModeCache } from '../../../src/bot/chat-mode-cache.js';
 import { PendingQueue } from '../../../src/bot/pending-queue.js';
 import { CallbackAuth, operatorForAction } from '../../../src/card/callback-auth.js';
 import { CallbackNonceStore } from '../../../src/card/callback-store.js';
-import { handleCardAction } from '../../../src/card/dispatcher.js';
+import { handleCardAction } from '../../../src/bot/card-actions.js';
 import type { Controls } from '../../../src/commands/index.js';
 import { createDefaultProfileConfig } from '../../../src/config/profile-schema.js';
 import { SessionStore } from '../../../src/session/store.js';

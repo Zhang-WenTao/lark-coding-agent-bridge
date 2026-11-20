@@ -3,10 +3,10 @@
 import type { LarkChannel, NormalizedMessage } from '@larksuite/channel';
 import type { ModelPinStore } from '../agent/model-pin';
 import type { AgentAdapter } from '../agent/types';
-import type { ActiveRuns } from '../bot/active-runs';
+import type { ActiveRuns } from '../runtime/active-runs';
 import type { AutoResumer } from '../bot/auto-resume';
 import type { KnownChat } from '../bot/lark-info';
-import type { ProcessPool } from '../bot/process-pool';
+import type { ProcessPool } from '../runtime/process-pool';
 import type { RunsMonitor } from '../bot/runs-monitor';
 import type { CodeSnippetStore } from '../card/code-snippets';
 import type { ProfileConfig } from '../config/profile-schema';

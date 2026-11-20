@@ -2,8 +2,8 @@ import { realpath } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { claudeCapability, codexCapability } from '../../../src/agent/capability.js';
-import { ActiveRuns } from '../../../src/bot/active-runs.js';
-import { ProcessPool } from '../../../src/bot/process-pool.js';
+import { ActiveRuns } from '../../../src/runtime/active-runs.js';
+import { ProcessPool } from '../../../src/runtime/process-pool.js';
 import {
   recordRunSessionEvent,
   startRunFlow,

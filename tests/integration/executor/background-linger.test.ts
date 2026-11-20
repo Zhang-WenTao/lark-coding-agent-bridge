@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { AgentAdapter, AgentEvent, AgentRun, AgentRunOptions } from '../../../src/agent/types';
-import { ActiveRuns } from '../../../src/bot/active-runs';
-import { ProcessPool } from '../../../src/bot/process-pool';
+import { ActiveRuns } from '../../../src/runtime/active-runs';
+import { ProcessPool } from '../../../src/runtime/process-pool';
 import type { RunPolicyAllow } from '../../../src/policy/run-policy';
 import { RunExecutor, type BackgroundTurn, type RunApprovalGates } from '../../../src/runtime/run-executor';
 import type { GateContext } from '../../../src/runtime/approvals';

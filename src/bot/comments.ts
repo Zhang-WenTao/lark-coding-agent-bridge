@@ -13,7 +13,7 @@ import { log } from '../core/logger';
 import { evaluateRunPolicy } from '../policy/run-policy';
 import { resolveWorkingDirectory } from '../policy/workspace';
 import { RunRejected } from '../runtime/errors';
-import type { ActiveRuns } from './active-runs';
+import type { ActiveRuns } from '../runtime/active-runs';
 import { recordRunSessionEvent } from './run-flow';
 import type { RunExecutor } from '../runtime/run-executor';
 import type { SessionCatalog } from '../session/catalog';

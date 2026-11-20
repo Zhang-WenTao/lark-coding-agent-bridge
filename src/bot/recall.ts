@@ -1,4 +1,4 @@
-import type { ActiveRuns, RunHandle } from './active-runs';
+import type { ActiveRuns, RunHandle } from '../runtime/active-runs';
 
 /**
  * Recalling a message sent to the bot takes back what it asked for: a queued

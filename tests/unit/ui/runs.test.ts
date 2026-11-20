@@ -13,7 +13,7 @@ vi.mock('../../../src/runtime/registry', async (importOriginal) => ({
 
 import type { NormalizedMessage } from '@larksuite/channel';
 import type { AgentRun } from '../../../src/agent/types';
-import { ActiveRuns } from '../../../src/bot/active-runs';
+import { ActiveRuns } from '../../../src/runtime/active-runs';
 import { PendingQueue } from '../../../src/bot/pending-queue';
 import { createRunsMonitor } from '../../../src/bot/runs-monitor';
 import { resolveAppPaths } from '../../../src/config/app-paths';

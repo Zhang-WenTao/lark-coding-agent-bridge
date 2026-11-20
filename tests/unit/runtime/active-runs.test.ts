@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { ActiveRuns } from '../../../src/bot/active-runs';
+import { ActiveRuns } from '../../../src/runtime/active-runs';
 import type { AgentRun } from '../../../src/agent/types';
 
 function fakeRun(): AgentRun {

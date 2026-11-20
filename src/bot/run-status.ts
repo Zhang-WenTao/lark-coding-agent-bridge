@@ -1,6 +1,6 @@
 import { isAlive } from '../agent/process-tree';
 import { formatAgo, formatClock, STALL_WARN_MS } from '../card/run-renderer';
-import type { RunHandle } from './active-runs';
+import type { RunHandle } from '../runtime/active-runs';
 
 /**
  * One line on what a live run is doing, for `/status`. Answered by the bridge

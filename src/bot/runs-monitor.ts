@@ -1,4 +1,4 @@
-import type { ActiveRuns } from './active-runs';
+import type { ActiveRuns } from '../runtime/active-runs';
 import type { PendingQueue } from './pending-queue';
 import type { RunRegistry } from '../runtime/run-registry';
 

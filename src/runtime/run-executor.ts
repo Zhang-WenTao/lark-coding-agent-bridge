@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { AgentAdapter, AgentEvent, AgentRun, AgentRunOptions, RunApprovals } from '../agent/types';
-import { ActiveRuns, type RunHandle } from '../bot/active-runs';
-import { ProcessPool } from '../bot/process-pool';
+import { ActiveRuns, type RunHandle } from './active-runs';
+import { ProcessPool } from './process-pool';
 import type { RunPolicyAllow } from '../policy/run-policy';
 import { log } from '../core/logger';
 import { agentDescriptor, isAgentKind } from '../agent/registry';

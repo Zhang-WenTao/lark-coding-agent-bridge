@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import type { AgentAdapter, AgentRun, AgentRunOptions } from '../../../src/agent/types';
-import { ActiveRuns } from '../../../src/bot/active-runs';
-import { ProcessPool } from '../../../src/bot/process-pool';
+import { ActiveRuns } from '../../../src/runtime/active-runs';
+import { ProcessPool } from '../../../src/runtime/process-pool';
 import { RunExecutor } from '../../../src/runtime/run-executor';
 import { RunRejected, SpawnFailed } from '../../../src/runtime/errors';
 import type { RunPolicyAllow } from '../../../src/policy/run-policy';

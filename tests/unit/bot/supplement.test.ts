@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { SupplementTarget } from '../../../src/bot/active-runs';
+import type { SupplementTarget } from '../../../src/runtime/active-runs';
 import {
   otherSupplementInstruction,
   supplementPreview,

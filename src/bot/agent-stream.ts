@@ -10,7 +10,7 @@ import {
 import { runningToolLabel } from '../card/run-activity';
 import { findLedger } from './task-ledger';
 import { log, reportMetric } from '../core/logger';
-import type { RunHandle } from './active-runs';
+import type { RunHandle } from '../runtime/active-runs';
 
 
 /** At most one `subagent-activity` log line per run this often. */

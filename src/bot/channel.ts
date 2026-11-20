@@ -32,7 +32,7 @@ import {
   type BridgePromptQuotedMessage,
 } from '../agent/prompt';
 import type { AgentAdapter, AgentEvent } from '../agent/types';
-import { handleCardAction } from '../card/dispatcher';
+import { handleCardAction } from './card-actions';
 import { CallbackAuth, operatorForAction } from '../card/callback-auth';
 import { CallbackNonceStore } from '../card/callback-store';
 import { CodeSnippetStore } from '../card/code-snippets';
@@ -114,7 +114,7 @@ import {
 } from '../session/smart-session';
 import type { SessionStore } from '../session/store';
 import type { WorkspaceStore } from '../workspace/store';
-import { ActiveRuns, type RunHandle } from './active-runs';
+import { ActiveRuns, type RunHandle } from '../runtime/active-runs';
 import { INTERRUPT_RESUME_DELAY_MS, MAX_INTERRUPT_RESUMES, isKilledExit, stripLedgerLines } from './task-ledger';
 import type { RunRecord } from '../runtime/run-registry';
 import {
@@ -155,7 +155,7 @@ import { ApprovalBroker, type GateContext } from '../runtime/approvals';
 import { ApprovalSocketServer } from '../runtime/approval-socket';
 import { AuditLog } from '../runtime/audit-log';
 import { createApprovalNotifier } from './approval-notifier';
-import { ProcessPool } from './process-pool';
+import { ProcessPool } from '../runtime/process-pool';
 import { fetchQuotedContext, type QuotedContext } from './quote';
 import { ChatContextCursorStore, fetchChatContext, planChatContext } from './chat-context';
 import { lookupMessageThreadId } from './thread-id';

@@ -1,5 +1,5 @@
 import type { NormalizedMessage, RawMessageEvent } from '@larksuite/channel';
-import type { ActiveRuns, RunHandle } from './active-runs';
+import type { ActiveRuns, RunHandle } from '../runtime/active-runs';
 import { mediaPlaceholders } from './media-placeholders';
 
 /**

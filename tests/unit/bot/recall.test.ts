@@ -1,7 +1,7 @@
 import type { NormalizedMessage } from '@larksuite/channel';
 import { describe, expect, it, vi } from 'vitest';
 import type { AgentRun } from '../../../src/agent/types';
-import { ActiveRuns, type RunHandle } from '../../../src/bot/active-runs';
+import { ActiveRuns, type RunHandle } from '../../../src/runtime/active-runs';
 import { PendingQueue } from '../../../src/bot/pending-queue';
 import {
   applyRecall,

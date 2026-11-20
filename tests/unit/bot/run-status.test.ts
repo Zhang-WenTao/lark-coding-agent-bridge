@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { RunHandle } from '../../../src/bot/active-runs.js';
+import type { RunHandle } from '../../../src/runtime/active-runs.js';
 import { describeActiveRun } from '../../../src/bot/run-status.js';
 
 function handle(overrides: Partial<RunHandle> = {}): RunHandle {

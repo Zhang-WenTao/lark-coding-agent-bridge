@@ -1,5 +1,5 @@
 import { tmpdir } from 'node:os';
-import { runCapture } from '../../git/exec';
+import { runCapture } from '../../platform/capture';
 import { log } from '../../core/logger';
 import { FABLE_WINDOW, type ClaudeAccountPool, type LineCap, type PickedAccount } from './accounts';
 import { parseClaudeUsage, parseFableWeek, usageByKind } from './quota';

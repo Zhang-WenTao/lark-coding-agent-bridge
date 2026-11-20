@@ -4,7 +4,7 @@ import { agentCapability } from '../agent/capability';
 import type { Controls } from '../commands/types';
 import { log } from '../core/logger';
 import type { RunExecutor } from '../runtime/run-executor';
-import type { ActiveRuns } from '../bot/active-runs';
+import type { ActiveRuns } from '../runtime/active-runs';
 import type { SessionCatalog } from '../session/catalog';
 import type { SessionStore } from '../session/store';
 import type { WorkspaceStore } from '../workspace/store';
