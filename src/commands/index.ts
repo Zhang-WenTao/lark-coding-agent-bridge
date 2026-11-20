@@ -1,5 +1,3 @@
-import { basename } from 'node:path';
-import { toolLabel } from '../card/approval-cards';
 import {
   DEFAULT_MODEL,
   normalizeModelSelection,
@@ -43,28 +41,15 @@ import { GROUP_MSG_SCOPE, hasGroupMsgScope } from '../bot/app-scope';
 import { requestScopeGrantLink } from '../bot/wizard';
 import { forgetManagedCard, sendManagedCard, updateManagedCard } from '../card/managed';
 import {
-  coffeeCard,
   cronCard,
-  diffCard,
   knowledgeCard,
   type KnowledgeStatusView,
   memoryCard,
-  pullRequestCard,
   skillLibrariesCard,
   skillsCard,
-  worktreeCard,
 } from '../card/templates';
-import {
-  describeDiffTarget,
-  parseDiffTarget,
-  previewPatch,
-  readDiffPatch,
-  readDiffStat,
-} from '../git/diff';
 import { isGitError } from '../git/exec';
-import { checksLabel, parsePrArg, readPullRequest, reviewLabel } from '../git/pr';
-import { isDirty, readRepoStatus, type GitRepoStatus } from '../git/status';
-import { addWorktree, listWorktrees, matchWorktree, removeWorktree } from '../git/worktree';
+import { isDirty } from '../git/status';
 import type { Scheduler } from '../scheduler/scheduler';
 import {
   CRON_USAGE,
@@ -112,22 +97,14 @@ import * as configOps from '../config/config-ops';
 import { log, reportMetric } from '../core/logger';
 import { isAlive } from '../runtime/registry';
 import { readUiSidecar } from '../ui/sidecar';
-import { resolveWorkingDirectory } from '../policy/workspace';
 import { validateAppCredentials } from '../utils/feishu-auth';
 import { fetchKnownChats } from '../bot/lark-info';
-import { codeBlockPost } from '../card/code-snippets';
 import { describeMeetingError, type MeetingManager } from '../meeting/manager';
 import { isMeetingNo } from '../meeting/api';
 import { answerInMeeting, meetingScopeId } from '../meeting/orchestrator';
 import type { MeetingSession } from '../meeting/session';
 import { isPlainCoffeeRequest } from './coffee-intent';
-import {
-  formatDreamPrs,
-  formatDreamRevert,
-  formatDreamRun,
-  formatDreamStatus,
-} from '../dream/format';
-import { formatAgoCompact, formatDateTime, formatMonthDayTime } from '../core/time-format';
+import { formatAgoCompact, formatDateTime } from '../core/time-format';
 import type { CommandContext } from './types';
 import { commandReplyOptions, reply, commandProfilePaths } from './shared';
 import {
@@ -148,6 +125,10 @@ import {
 } from './handlers/lifecycle';
 import { handleDoctor } from './handlers/doctor';
 import { handleAccounts, handleApproval, handleHelp, handleUsage } from './handlers/usage';
+import { handleDream } from './handlers/dream';
+import { handleAudit } from './handlers/audit';
+import { handleCoffee, handleCopyCode } from './handlers/misc';
+import { handleDiff, handlePr, handleWorktree } from './handlers/git';
 
 export type { CommandContext, Controls } from './types';
 
@@ -296,447 +277,6 @@ export async function runCommandHandler(
   }
   return true;
 }
-
-/**
- * 「复制代码」 button on a finished card: send that code block alone as a
- * reply to the card. It goes out as a rich-text code block, whose copy icon
- * copies it whole (cards can't write the clipboard, and their own code blocks
- * have no copy icon); code that itself holds a ``` fence goes out as plain
- * text instead. Args: `<key> [lang]`; cards from before the language rode
- * along carry only the key.
- */
-async function handleCopyCode(args: string, ctx: CommandContext): Promise<void> {
-  const [key = '', lang = ''] = args.trim().split(/\s+/);
-  const code = key ? ctx.controls.codeSnippets?.get(key) : undefined;
-  if (!code) {
-    await reply(ctx, '这段代码已经找不到了（太久以前的卡片），请让我重新发一次。');
-    return;
-  }
-  const post = codeBlockPost(code, lang);
-  log.info('command', 'copycode', { key, chars: code.length, as: post ? 'code-block' : 'text' });
-  try {
-    await ctx.channel.send(ctx.msg.chatId, post ? { post } : { text: code }, commandReplyOptions(ctx));
-  } catch (err) {
-    log.fail('command', err, { step: 'copycode' });
-    await reply(ctx, '代码发送失败，请稍后再点一次。');
-  }
-}
-
-const AUDIT_EVENT_LABELS: Record<string, string> = {
-  allowed: '已允许',
-  'auto-allowed': '本轮已允许',
-  'config-allowed': '免审批清单',
-  denied: '已拒绝',
-  timeout: '超时拒绝',
-  cancelled: '已取消',
-};
-
-/**
- * `/practice` — 课堂精练. Admin-only and DM-only: a run reads every chat's
- * conversations, and its drafts and diffs can carry any of them. The chat only
- * ever sees counts and PR links; `diff` is the one view of draft content.
- */
-async function handleDream(args: string, ctx: CommandContext): Promise<void> {
-  if (ctx.chatMode !== 'p2p') {
-    await reply(ctx, '课堂精练涉及所有会话的内容，请私聊 bot 发送 `/practice`。');
-    return;
-  }
-  const dream = ctx.controls.dream;
-  if (!dream) {
-    await reply(ctx, '当前 bridge 没有启用课堂精练（缺少 profile 数据目录或知识库）。');
-    return;
-  }
-  const [sub = '', ...rest] = args.trim().split(/\s+/);
-  switch (sub) {
-    case '':
-    case 'status':
-      await reply(ctx, formatDreamStatus(await dream.status()));
-      return;
-    case 'run': {
-      const actor = { id: ctx.msg.senderId, ...(ctx.msg.senderName ? { name: ctx.msg.senderName } : {}) };
-      const started = await dream.start(actor, (run) => {
-        void reply(ctx, formatDreamRun(run));
-      });
-      await reply(
-        ctx,
-        'error' in started
-          ? `❌ ${started.error}`
-          : `📚 已开始整理，批次 \`${started.run.id}\`。${getDream(ctx.controls.cfg)?.external.length ? '先做课前学习，再' : ''}读取已结束的会话、生成草稿并${getDream(ctx.controls.cfg)?.publish === 'push' ? '直接提交推送（写更新日志）' : '开 Draft PR'}，完成后在这里回复结果；\`/practice cancel\` 可以取消。`,
-      );
-      return;
-    }
-    case 'cancel':
-      await reply(ctx, dream.cancel() ? '⏹ 已请求取消，当前步骤结束后停止；游标不会移动。' : '现在没有在进行的整理。');
-      return;
-    case 'prs':
-      await reply(ctx, formatDreamPrs(await dream.pullRequests()));
-      return;
-    case 'revert': {
-      if (!rest[0]) {
-        await reply(ctx, '用法：`/practice revert <批次>`，批次号见 `/practice prs`。');
-        return;
-      }
-      const result = await dream.revert(rest[0]);
-      await reply(ctx, 'error' in result ? `❌ ${result.error}` : formatDreamRevert(result));
-      return;
-    }
-    case 'diary': {
-      const result = dream.diary(rest[0]);
-      await reply(ctx, 'error' in result ? result.error : `**🌙 梦境日记**\n\n${result.diary.replace(/^## /, '### ')}`);
-      return;
-    }
-    case 'diff': {
-      const result = await dream.diff(rest[0]);
-      if ('error' in result) {
-        await reply(ctx, result.error);
-        return;
-      }
-      const fence = '```';
-      const body = result.parts
-        .map((part) => `**${part.label}**\n${fence}diff\n${clipDiff(part.diff, 6000).replaceAll(fence, "'''")}\n${fence}`)
-        .join('\n\n');
-      await reply(ctx, `**📚 批次 \`${result.id}\` 的差异**\n\n${body}`);
-      return;
-    }
-    default:
-      await reply(
-        ctx,
-        [
-          '**📚 课堂精练**',
-          '',
-          '`/practice` — 状态：开关、目标仓库、上次结果、待审核 PR 数',
-          '`/practice run` — 立即整理：先学配置的外部库（课前学习），再读取已结束的会话，生成记忆 / 笔记 / skill 草稿并发布',
-          '`/practice cancel` — 取消正在进行的整理',
-          '`/practice prs` — 整理开出的 PR 及审核状态',
-          '`/practice diff [批次]` — 查看某个批次的差异（默认最近一次）',
-          '`/practice diary [批次]` — 梦境日记：这一轮读了什么、归纳出什么主题、写进 / 整合 / 归档了什么、多少没采纳（默认最近一次）',
-          '`/practice revert <批次>` — 撤销一个已合并的批次（开一个撤销用的 Draft PR）',
-          '',
-          '默认以 Draft PR 发布、审核合并后才生效；配置文件里 `dreamTuning.publish: "push"` 改为直接提交推送并写 CHANGELOG.md。「课堂精练」「自动整理」两个开关在 `/config` 里。',
-          '自动整理默认不按天跑：新内容攒够、距上次够久、上一批 PR 审完、在允许时段且没有别的任务时才跑；设了 `dreamTuning.dailyAt` 就每天定时跑。用户消息一来就让路。',
-        ].join('\n'),
-      );
-  }
-}
-
-function clipDiff(diff: string, max: number): string {
-  return diff.length > max ? `${diff.slice(0, max)}\n… (已截断，完整内容见 PR)` : diff;
-}
-
-/**
- * `/audit [N]`: the latest side-effecting steps (commands, file writes,
- * external tools) and approval decisions, newest first. Private chat only —
- * it spans every chat of the profile.
- */
-async function handleAudit(args: string, ctx: CommandContext): Promise<void> {
-  if (ctx.chatMode !== 'p2p') {
-    await reply(ctx, '审计记录涉及所有会话，请私聊 bot 发送 `/audit` 查看。');
-    return;
-  }
-  const audit = ctx.controls.audit;
-  if (!audit) {
-    await reply(ctx, '当前 profile 没有开启审计记录。');
-    return;
-  }
-  const n = Number.parseInt(args.trim(), 10);
-  const limit = Number.isFinite(n) && n > 0 ? Math.min(n, 100) : 20;
-  const entries = (await audit.query({ limit: limit * 3 }))
-    .filter((e) => e.kind === 'tool' || (e.event && e.event in AUDIT_EVENT_LABELS))
-    .slice(0, limit);
-  if (entries.length === 0) {
-    await reply(ctx, '还没有审计记录。');
-    return;
-  }
-  const chats = new Map((ctx.controls.knownChats ?? []).map((c) => [c.id, c.name]));
-  const lines = entries.map((e) => {
-    const when = formatMonthDayTime(e.at);
-    const who = e.actorId === ctx.msg.senderId ? '你' : (e.actorName ?? `…${e.actorId.slice(-6)}`);
-    const where = e.chatId ? (chats.get(e.chatId) ?? '会话') : e.source;
-    const what = `${toolLabel(e.tool)} \`${e.summary.replace(/`/g, "'").slice(0, 80)}\``;
-    const outcome =
-      e.kind === 'approval'
-        ? ` · ${AUDIT_EVENT_LABELS[e.event!]}`
-        : e.gated
-          ? ' · 非管理员会话'
-          : '';
-    return `- ${when} ${who}（${where}）${what}${outcome}`;
-  });
-  await reply(ctx, [`**最近 ${entries.length} 条操作记录**`, ...lines].join('\n'));
-}
-
-async function handleCoffee(_args: string, ctx: CommandContext): Promise<void> {
-  await ctx.channel.send(ctx.msg.chatId, { card: coffeeCard() }, commandReplyOptions(ctx));
-}
-
-// ─── git: /diff, /worktree, /pr ───────────────────────────────────────────
-
-/** Resolve the repo the current session points at, or reply why we cannot. */
-async function requireRepo(
-  ctx: CommandContext,
-): Promise<{ cwd: string; status: GitRepoStatus } | undefined> {
-  const cwd = effectiveWorkspaceCwd(ctx);
-  if (!cwd) {
-    await reply(ctx, '当前会话没有工作目录，先用 `/cd <路径>` 指一个。');
-    return undefined;
-  }
-  const status = await readRepoStatus(cwd).catch(() => undefined);
-  if (!status) {
-    await reply(ctx, `\`${cwd}\` 不是 git 仓库（或本机没有装 git）。`);
-    return undefined;
-  }
-  return { cwd, status };
-}
-
-async function handleDiff(args: string, ctx: CommandContext): Promise<void> {
-  const repo = await requireRepo(ctx);
-  if (!repo) return;
-
-  const target = parseDiffTarget(args);
-  if (isGitError(target)) {
-    await reply(ctx, `❌ ${target.error}`);
-    return;
-  }
-
-  const summary = await readDiffStat(repo.cwd, target);
-  if (isGitError(summary)) {
-    await reply(ctx, `❌ ${summary.error}`);
-    return;
-  }
-
-  const patch = await readDiffPatch(repo.cwd, target);
-  const patchText = isGitError(patch) ? '' : patch.patch;
-  const preview = previewPatch(patchText);
-  // Anything that did not fit inline goes out as a real .patch file — reading a
-  // long diff as chat text is hopeless, and the file can be opened elsewhere.
-  const attach = preview.omittedLines > 0 && patchText.length > 0;
-
-  await ctx.channel.send(
-    ctx.msg.chatId,
-    {
-      card: diffCard({
-        scope: describeDiffTarget(target),
-        files: summary.files,
-        added: summary.added,
-        removed: summary.removed,
-        untracked: summary.untracked,
-        preview: preview.text,
-        omittedLines: preview.omittedLines,
-        attached: attach,
-      }),
-    },
-    commandReplyOptions(ctx),
-  );
-
-  if (!attach) return;
-  const name = `${basename(repo.status.root)}-${target.kind === 'ref' ? target.ref.replace(/[^\w.-]+/g, '-') : target.kind}.patch`;
-  await ctx.channel
-    .send(
-      ctx.msg.chatId,
-      { file: { source: Buffer.from(patchText, 'utf8'), fileName: name } },
-      commandReplyOptions(ctx),
-    )
-    .catch(async (err: unknown) => {
-      log.warn('git', 'patch-upload-failed', { err: String(err) });
-      await reply(ctx, '完整 patch 发送失败，可以在本地用 `git diff` 查看。');
-    });
-}
-
-async function handleWorktree(args: string, ctx: CommandContext): Promise<void> {
-  const trimmed = args.trim();
-  const [sub = '', ...rest] = trimmed.split(/\s+/);
-  switch (sub) {
-    case '':
-    case 'list':
-      return worktreeList(ctx);
-    case 'add':
-      return worktreeAdd(rest[0] ?? '', rest[1], ctx);
-    case 'use':
-      return worktreeUse(rest.join(' '), ctx);
-    case 'remove':
-    case 'rm':
-      return worktreeRemove(rest.filter((token) => token !== '--force').join(' '), rest.includes('--force'), ctx);
-    default:
-      await reply(
-        ctx,
-        [
-          '**worktree**',
-          '',
-          '`/worktree` — 列出当前仓库的 worktree',
-          '`/worktree add <分支> [起点]` — 新建 worktree 并把本会话切过去',
-          '`/worktree use <分支|路径>` — 切到已有的 worktree',
-          '`/worktree remove <分支|路径> [--force]` — 删除',
-        ].join('\n'),
-      );
-  }
-}
-
-async function worktreeList(ctx: CommandContext): Promise<void> {
-  const repo = await requireRepo(ctx);
-  if (!repo) return;
-  const entries = await listWorktrees(repo.cwd);
-  if (isGitError(entries)) {
-    await reply(ctx, `❌ ${entries.error}`);
-    return;
-  }
-  await ctx.channel.send(
-    ctx.msg.chatId,
-    {
-      card: worktreeCard(
-        entries.map((entry) => ({
-          path: entry.path,
-          ...(entry.branch ? { branch: entry.branch } : {}),
-          ...(entry.head ? { head: entry.head } : {}),
-          main: entry.main,
-          current: entry.path === repo.status.root,
-        })),
-      ),
-    },
-    commandReplyOptions(ctx),
-  );
-}
-
-async function worktreeAdd(branch: string, base: string | undefined, ctx: CommandContext): Promise<void> {
-  if (!branch) {
-    await reply(ctx, '用法：`/worktree add <分支> [起点]`');
-    return;
-  }
-  const repo = await requireRepo(ctx);
-  if (!repo) return;
-
-  const created = await addWorktree({
-    cwd: repo.cwd,
-    repoRoot: repo.status.root,
-    branch,
-    ...(base ? { base } : {}),
-  });
-  if (isGitError(created)) {
-    await reply(ctx, `❌ 新建 worktree 失败：${created.error}`);
-    return;
-  }
-
-  ctx.workspaces.trackWorktree({
-    repoRoot: repo.status.root,
-    path: created.path,
-    branch: created.branch,
-    ownedBranch: !created.existingBranch,
-  });
-
-  // Creating a worktree for a task and then working in the old directory is
-  // never what anyone means, so the session moves with it — same as `/cd`.
-  const resolved = await resolveWorkingDirectory(created.path);
-  if (!resolved.ok) {
-    await reply(ctx, `worktree 已创建在 \`${created.path}\`，但切换失败：${resolved.userVisible}`);
-    return;
-  }
-  ctx.activeRuns.interrupt(ctx.scope);
-  ctx.workspaces.setCwd(ctx.scope, resolved.cwdRealpath);
-  ctx.sessions.clear(ctx.scope);
-  log.info('git', 'worktree-added', { scope: ctx.scope, branch: created.branch });
-  await reply(
-    ctx,
-    [
-      `🌿 已创建 worktree 并切过去：`,
-      `- 分支：\`${created.branch}\`${created.existingBranch ? '（已存在的分支）' : '（新建分支）'}`,
-      `- 路径：\`${resolved.cwdRealpath}\``,
-      '',
-      '会话已重置，接下来的对话都在这个 worktree 里。',
-    ].join('\n'),
-  );
-}
-
-async function worktreeUse(needle: string, ctx: CommandContext): Promise<void> {
-  if (!needle) {
-    await reply(ctx, '用法：`/worktree use <分支|路径>`');
-    return;
-  }
-  const repo = await requireRepo(ctx);
-  if (!repo) return;
-  const entries = await listWorktrees(repo.cwd);
-  if (isGitError(entries)) {
-    await reply(ctx, `❌ ${entries.error}`);
-    return;
-  }
-  const match = matchWorktree(entries, needle);
-  if (!match) {
-    await reply(ctx, `没找到叫 \`${needle}\` 的 worktree，用 \`/worktree\` 看看列表。`);
-    return;
-  }
-  const resolved = await resolveWorkingDirectory(match.path);
-  if (!resolved.ok) {
-    await reply(ctx, resolved.userVisible);
-    return;
-  }
-  ctx.activeRuns.interrupt(ctx.scope);
-  ctx.workspaces.setCwd(ctx.scope, resolved.cwdRealpath);
-  ctx.sessions.clear(ctx.scope);
-  await reply(ctx, `✓ 已切到 \`${resolved.cwdRealpath}\`（分支 \`${match.branch ?? '游离'}\`），会话已重置。`);
-}
-
-async function worktreeRemove(needle: string, force: boolean, ctx: CommandContext): Promise<void> {
-  if (!needle) {
-    await reply(ctx, '用法：`/worktree remove <分支|路径> [--force]`');
-    return;
-  }
-  const repo = await requireRepo(ctx);
-  if (!repo) return;
-  const entries = await listWorktrees(repo.cwd);
-  if (isGitError(entries)) {
-    await reply(ctx, `❌ ${entries.error}`);
-    return;
-  }
-  const match = matchWorktree(entries, needle);
-  if (!match) {
-    await reply(ctx, `没找到叫 \`${needle}\` 的 worktree。`);
-    return;
-  }
-  if (match.main) {
-    await reply(ctx, '这是主 checkout，不能删。');
-    return;
-  }
-  // Removing the tree the session is standing in would leave every later run
-  // pointing at a path that no longer exists.
-  if (match.path === repo.status.root) {
-    await reply(ctx, '当前会话正在这个 worktree 里，先 `/worktree use <别的>` 或 `/cd` 出去再删。');
-    return;
-  }
-  const removed = await removeWorktree(repo.cwd, match.path, { force });
-  if (isGitError(removed)) {
-    await reply(ctx, `❌ 删除失败：${removed.error}${force ? '' : '\n有未提交改动时可以加 `--force`。'}`);
-    return;
-  }
-  ctx.workspaces.forgetWorktree(match.path);
-  log.info('git', 'worktree-removed', { scope: ctx.scope, path: match.path });
-  await reply(ctx, `🗑 已删除 worktree \`${match.path}\`。`);
-}
-
-async function handlePr(args: string, ctx: CommandContext): Promise<void> {
-  const repo = await requireRepo(ctx);
-  if (!repo) return;
-  const lookup = parsePrArg(args);
-  if (isGitError(lookup)) {
-    await reply(ctx, `❌ ${lookup.error}`);
-    return;
-  }
-  const pr = await readPullRequest(repo.cwd, lookup);
-  if (isGitError(pr)) {
-    await reply(ctx, `❌ ${pr.error}`);
-    return;
-  }
-  await ctx.channel.send(
-    ctx.msg.chatId,
-    {
-      card: pullRequestCard({
-        ...pr,
-        checksLabel: checksLabel(pr.checks),
-        failingChecks: pr.checks.failing,
-        reviewLabel: reviewLabel(pr.reviewDecision),
-      }),
-    },
-    commandReplyOptions(ctx),
-  );
-}
-
-// ─── knowledge: /memory, /skills, /knowledge ──────────────────────────────
 
 function requireKnowledge(ctx: CommandContext): KnowledgeStore | undefined {
   return ctx.controls.knowledge;
