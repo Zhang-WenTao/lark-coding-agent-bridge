@@ -1,7 +1,6 @@
 import { createHash } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
 import { log } from '../core/logger';
-import { writeFileAtomic } from '../platform/atomic-write';
+import { JsonFile } from '../platform/json-file';
 
 /** One fenced code block found in an answer. */
 export interface CodeBlock {
@@ -71,24 +70,25 @@ export function codeBlockPost(code: string, lang = ''): object | null {
  */
 export class CodeSnippetStore {
   private readonly snippets = new Map<string, string>();
-  private saving: Promise<void> = Promise.resolve();
+  private readonly file: JsonFile;
 
   constructor(
-    private readonly path: string,
+    path: string,
     private readonly cap = 500,
-  ) {}
+  ) {
+    this.file = new JsonFile(path, {
+      mode: 0o600,
+      onLoadError: (err, movedTo) => log.fail('code-snippets', err, { step: 'load', ...(movedTo ? { movedTo } : {}) }),
+      onPersistError: (err) => log.fail('code-snippets', err, { step: 'persist' }),
+    });
+  }
 
   async load(): Promise<void> {
-    try {
-      const raw = JSON.parse(await readFile(this.path, 'utf8')) as unknown;
-      if (!raw || typeof raw !== 'object') return;
-      this.snippets.clear();
-      for (const [key, code] of Object.entries(raw as Record<string, unknown>)) {
-        if (typeof code === 'string') this.snippets.set(key, code);
-      }
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
-      log.fail('code-snippets', err, { step: 'load' });
+    const raw = await this.file.load();
+    if (!raw || typeof raw !== 'object') return;
+    this.snippets.clear();
+    for (const [key, code] of Object.entries(raw as Record<string, unknown>)) {
+      if (typeof code === 'string') this.snippets.set(key, code);
     }
   }
 
@@ -114,20 +114,10 @@ export class CodeSnippetStore {
   }
 
   async flush(): Promise<void> {
-    await this.saving;
+    await this.file.flush();
   }
 
   private schedulePersist(): void {
-    this.saving = this.saving
-      .then(async () => {
-        await writeFileAtomic(
-          this.path,
-          `${JSON.stringify(Object.fromEntries(this.snippets))}\n`,
-          { mode: 0o600 },
-        );
-      })
-      .catch((err: unknown) => {
-        log.fail('code-snippets', err, { step: 'persist' });
-      });
+    this.file.write(`${JSON.stringify(Object.fromEntries(this.snippets))}\n`);
   }
 }

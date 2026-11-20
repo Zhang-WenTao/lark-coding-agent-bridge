@@ -1,6 +1,5 @@
-import { readFile } from 'node:fs/promises';
 import { log } from '../core/logger';
-import { writeFileAtomic } from '../platform/atomic-write';
+import { JsonFile } from '../platform/json-file';
 import { localDayKey } from '../runtime/usage-ledger';
 
 interface ExposureData {
@@ -24,26 +23,27 @@ interface ExposureData {
  */
 export class NoteExposure {
   private data: ExposureData = { version: 1, counts: {} };
-  private saving: Promise<void> = Promise.resolve();
+  private readonly file: JsonFile;
 
   constructor(
-    private readonly path: string,
+    path: string,
     private readonly dayKey: (at: number) => string = localDayKey,
-  ) {}
+  ) {
+    this.file = new JsonFile(path, {
+      onLoadError: (err, movedTo) =>
+        log.warn('knowledge', 'exposure-load-failed', { err: String(err), ...(movedTo ? { movedTo } : {}) }),
+      onPersistError: (err) => log.warn('knowledge', 'exposure-persist-failed', { err: String(err) }),
+    });
+  }
 
   async load(): Promise<void> {
-    try {
-      const raw = JSON.parse(await readFile(this.path, 'utf8')) as Partial<ExposureData>;
-      if (raw?.version === 1 && raw.counts && typeof raw.counts === 'object') {
-        this.data = {
-          version: 1,
-          counts: raw.counts,
-          ...(typeof raw.day === 'string' && raw.frozen ? { day: raw.day, frozen: raw.frozen } : {}),
-        };
-      }
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
-      log.warn('knowledge', 'exposure-load-failed', { err: String(err) });
+    const raw = (await this.file.load()) as Partial<ExposureData> | undefined;
+    if (raw?.version === 1 && raw.counts && typeof raw.counts === 'object') {
+      this.data = {
+        version: 1,
+        counts: raw.counts,
+        ...(typeof raw.day === 'string' && raw.frozen ? { day: raw.day, frozen: raw.frozen } : {}),
+      };
     }
   }
 
@@ -67,14 +67,11 @@ export class NoteExposure {
   }
 
   private persist(): void {
-    const snapshot = JSON.stringify(this.data);
-    this.saving = this.saving
-      .then(() => writeFileAtomic(this.path, snapshot))
-      .catch((err: unknown) => log.warn('knowledge', 'exposure-persist-failed', { err: String(err) }));
+    this.file.write(JSON.stringify(this.data));
   }
 
   /** Resolves once every write queued so far has landed (tests). */
   flush(): Promise<void> {
-    return this.saving;
+    return this.file.flush();
   }
 }

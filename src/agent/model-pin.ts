@@ -1,6 +1,5 @@
-import { readFile } from 'node:fs/promises';
 import { log } from '../core/logger';
-import { writeFileAtomic } from '../platform/atomic-write';
+import { JsonFile } from '../platform/json-file';
 
 /**
  * 指定模型: `/model sonnet 帮我…` pins a topic to one model. Outside a topic
@@ -60,22 +59,24 @@ function isPin(x: unknown): x is ModelPin {
 /** Each scope's pinned model, kept on disk so a restart keeps the topic on it. */
 export class ModelPinStore {
   private data: Record<string, ModelPin> = {};
-  private saving: Promise<void> = Promise.resolve();
+  private readonly file: JsonFile;
 
-  constructor(private readonly path?: string) {}
+  constructor(path?: string) {
+    this.file = new JsonFile(path, {
+      mode: 0o600,
+      onLoadError: (err, movedTo) =>
+        log.warn('model-pin', 'load-failed', { err: String(err), ...(movedTo ? { movedTo } : {}) }),
+      onPersistError: (err) => log.warn('model-pin', 'persist-failed', { err: String(err) }),
+    });
+  }
 
   async load(now: number = Date.now()): Promise<void> {
-    if (!this.path) return;
-    try {
-      const raw = JSON.parse(await readFile(this.path, 'utf8')) as Record<string, unknown>;
-      this.data = {};
-      for (const [scope, entry] of Object.entries(raw)) {
-        if (isPin(entry) && now - entry.updatedAt < MAX_AGE_MS) this.data[scope] = entry;
-      }
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
-      log.warn('model-pin', 'load-failed', { err: String(err) });
-      this.data = {};
+    if (!this.file.path) return;
+    const raw = await this.file.load();
+    this.data = {};
+    if (!raw || typeof raw !== 'object') return;
+    for (const [scope, entry] of Object.entries(raw as Record<string, unknown>)) {
+      if (isPin(entry) && now - entry.updatedAt < MAX_AGE_MS) this.data[scope] = entry;
     }
   }
 
@@ -104,15 +105,10 @@ export class ModelPinStore {
   }
 
   async flush(): Promise<void> {
-    await this.saving;
+    await this.file.flush();
   }
 
   private schedulePersist(): void {
-    if (!this.path) return;
-    const path = this.path;
-    const snapshot = JSON.stringify(this.data);
-    this.saving = this.saving
-      .then(() => writeFileAtomic(path, snapshot, { mode: 0o600 }))
-      .catch((err) => log.warn('model-pin', 'persist-failed', { err: String(err) }));
+    this.file.write(JSON.stringify(this.data));
   }
 }

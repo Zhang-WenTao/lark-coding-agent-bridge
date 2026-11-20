@@ -1,8 +1,7 @@
 import { randomBytes } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
 import { paths } from '../config/paths';
 import { log } from '../core/logger';
-import { writeFileAtomic } from '../platform/atomic-write';
+import { JsonFile } from '../platform/json-file';
 import { isScheduledJob, type ScheduledJob } from './types';
 
 interface JobData {
@@ -18,30 +17,25 @@ interface JobData {
  */
 export class JobStore {
   private data: JobData = { jobs: {} };
-  private saving: Promise<void> = Promise.resolve();
-  private readonly path: string;
+  private readonly file: JsonFile;
 
   constructor(path: string = paths.jobsFile) {
-    this.path = path;
+    this.file = new JsonFile(path, {
+      mode: 0o600,
+      onLoadError: (err, movedTo) => {
+        if (!movedTo) throw err;
+        // A corrupt jobs file must not take the bridge down with it — chat still
+        // works, the operator finds the reason in the log, and the original is
+        // kept at `movedTo` instead of being overwritten by the next save.
+        log.warn('scheduler', 'jobs-parse-failed', { path, movedTo, err: String(err) });
+      },
+      onPersistError: (err) => log.fail('scheduler', err, { step: 'persist' }),
+    });
   }
 
   async load(): Promise<void> {
-    let text: string;
-    try {
-      text = await readFile(this.path, 'utf8');
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
-      throw err;
-    }
-    let parsed: Partial<JobData>;
-    try {
-      parsed = JSON.parse(text) as Partial<JobData>;
-    } catch (err) {
-      // A corrupt jobs file must not take the bridge down with it — chat still
-      // works, and the operator finds the reason in the log.
-      log.warn('scheduler', 'jobs-parse-failed', { path: this.path, err: String(err) });
-      return;
-    }
+    const parsed = (await this.file.load()) as Partial<JobData> | undefined;
+    if (!parsed || typeof parsed !== 'object') return;
     const jobs: Record<string, ScheduledJob> = {};
     let dropped = 0;
     for (const [id, entry] of Object.entries(parsed.jobs ?? {})) {
@@ -95,7 +89,7 @@ export class JobStore {
   }
 
   async flush(): Promise<void> {
-    await this.saving;
+    await this.file.flush();
   }
 
   /**
@@ -111,14 +105,6 @@ export class JobStore {
   }
 
   private schedulePersist(): void {
-    this.saving = this.saving
-      .then(async () => {
-        await writeFileAtomic(this.path, `${JSON.stringify(this.data, null, 2)}\n`, {
-          mode: 0o600,
-        });
-      })
-      .catch((err: unknown) => {
-        log.fail('scheduler', err, { step: 'persist' });
-      });
+    this.file.write(`${JSON.stringify(this.data, null, 2)}\n`);
   }
 }
