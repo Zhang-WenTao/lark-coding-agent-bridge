@@ -1,9 +1,8 @@
-import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
-import { basename, dirname, isAbsolute } from 'node:path';
+import { basename } from 'node:path';
 import { agentAccountsReport, agentAccountsTable, switchAgentAccount } from '../agent/account';
 import { agentCapability } from '../agent/capability';
-import { agentDescriptor, type AgentKind } from '../agent/registry';
+import { agentDescriptor } from '../agent/registry';
 import {
   emptyTotals,
   formatTokens,
@@ -11,7 +10,12 @@ import {
   type UsageTotals,
 } from '../runtime/usage-ledger';
 import { toolLabel } from '../card/approval-cards';
-import { DEFAULT_MODEL, normalizeModelSelection, supportedEfforts, supportedModels } from '../agent/models';
+import {
+  DEFAULT_MODEL,
+  normalizeModelSelection,
+  supportedEfforts,
+  supportedModels,
+} from '../agent/models';
 import {
   DEFAULT_KNOWLEDGE_SYNC_INTERVAL_MINUTES,
   getKnowledgeSyncIntervalMinutes,
@@ -57,7 +61,6 @@ import {
   type KnowledgeStatusView,
   memoryCard,
   pullRequestCard,
-  resumeCard,
   skillLibrariesCard,
   skillsCard,
   statusCard,
@@ -65,7 +68,6 @@ import {
   usageCard,
   type StatusInfo,
   worktreeCard,
-  workspacesCard,
 } from '../card/templates';
 import {
   describeDiffTarget,
@@ -92,7 +94,13 @@ import {
 } from '../scheduler/command';
 import { jobScopeId } from '../scheduler/runner';
 import type { ScheduledJob } from '../scheduler/types';
-import type { AppConfig, AppPreferences, EffortLevel, MessageReplyMode, TenantBrand } from '../config/schema';
+import type {
+  AppConfig,
+  AppPreferences,
+  EffortLevel,
+  MessageReplyMode,
+  TenantBrand,
+} from '../config/schema';
 import {
   getAgentStopGraceMs,
   getCotMessages,
@@ -114,7 +122,6 @@ import type {
   SkillLibraryConfig,
 } from '../config/profile-schema';
 import { effectiveLarkCliIdentity } from '../config/profile-schema';
-import { resolveAppPaths } from '../config/app-paths';
 import { describeActiveRun } from '../bot/run-status';
 import { formatMoment, limitLabel } from '../bot/auto-resume';
 import { parseClaudeUsage, readClaudeUsage, usageMarkdown } from './usage';
@@ -137,21 +144,13 @@ import {
   reduce,
   type RunState,
 } from '../card/run-state';
-import { formatRelTime, listRecentSessions, type SessionSummary } from '../session/history';
-import {
-  listCodexThreadHistory,
-  type CodexThreadHistoryEntry,
-} from '../session/codex-history';
-import type { SessionCatalogIdentity } from '../session/catalog';
 import { isAlive, readAndPrune, resolveTarget } from '../runtime/registry';
 import { readUiSidecar } from '../ui/sidecar';
 import { resolveWorkingDirectory } from '../policy/workspace';
-import { expandHome } from '../platform/paths';
 import { evaluateRunPolicy } from '../policy/run-policy';
 import type { RunExecutor } from '../runtime/run-executor';
 import { RunRejected } from '../runtime/errors';
 import { validateAppCredentials } from '../utils/feishu-auth';
-import { createBoundChat, defaultChatName } from '../bot/group';
 import { fetchKnownChats } from '../bot/lark-info';
 import { codeBlockPost } from '../card/code-snippets';
 import { decideRotation } from '../session/smart-session';
@@ -162,28 +161,27 @@ import { answerInMeeting, meetingScopeId } from '../meeting/orchestrator';
 import type { MeetingSession } from '../meeting/session';
 import { hasStructuredLarkCliUserAuth } from '../lark-cli/identity-policy';
 import { isPlainCoffeeRequest } from './coffee-intent';
-import { formatDreamPrs, formatDreamRevert, formatDreamRun, formatDreamStatus } from '../dream/format';
+import {
+  formatDreamPrs,
+  formatDreamRevert,
+  formatDreamRun,
+  formatDreamStatus,
+} from '../dream/format';
 import { formatAgoCompact, formatDateTime, formatMonthDayTime } from '../core/time-format';
+import type { CommandContext } from './types';
+import { commandReplyOptions, reply, commandProfilePaths } from './shared';
+import {
+  effectiveWorkspaceCwd,
+  handleCd,
+  handleDoc,
+  handleNew,
+  handleWs,
+} from './handlers/workspace';
+import { handleResume } from './handlers/resume';
 
 export type { CommandContext, Controls } from './types';
-import type { CommandContext } from './types';
 
 type Handler = (args: string, ctx: CommandContext) => Promise<void>;
-
-interface ResumeCandidate {
-  scopeId: string;
-  agentId: AgentKind;
-  cwdRealpath: string;
-  policyFingerprint: string;
-  sessionId?: string;
-  threadId?: string;
-  expiresAt: number;
-}
-
-const RESUME_CANDIDATE_TTL_MS = 10 * 60 * 1000;
-const resumeCandidates = new Map<string, ResumeCandidate>();
-const AUDIT_SAFE_COMMAND_REPLY = '命令已处理。';
-const RESUME_APPLIED_REPLY = '已完成，请继续发送下一条消息。';
 
 const handlers: Record<string, Handler> = {
   '/new': handleNew,
@@ -330,11 +328,6 @@ export async function runCommandHandler(
 }
 
 /**
- * Send a plain markdown reply, swallowing any send error. Used by command
- * handlers where a failed reply shouldn't bubble up and crash the bot —
- * losing the message is better than dying.
- */
-/**
  * 「复制代码」 button on a finished card: send that code block alone as a
  * reply to the card. It goes out as a rich-text code block, whose copy icon
  * copies it whole (cards can't write the clipboard, and their own code blocks
@@ -357,512 +350,6 @@ async function handleCopyCode(args: string, ctx: CommandContext): Promise<void> 
     log.fail('command', err, { step: 'copycode' });
     await reply(ctx, '代码发送失败，请稍后再点一次。');
   }
-}
-
-async function reply(ctx: CommandContext, markdown: string): Promise<void> {
-  try {
-    await ctx.channel.send(ctx.msg.chatId, { markdown }, commandReplyOptions(ctx));
-  } catch (err) {
-    log.fail('command', err, { step: 'reply' });
-    reportMetric('command_fail', 1, { step: 'reply' });
-    if (!isMessageAuditReject(err) || markdown === AUDIT_SAFE_COMMAND_REPLY) return;
-    try {
-      await ctx.channel.send(
-        ctx.msg.chatId,
-        { markdown: AUDIT_SAFE_COMMAND_REPLY },
-        commandReplyOptions(ctx),
-      );
-    } catch (fallbackErr) {
-      log.fail('command', fallbackErr, { step: 'reply-audit-fallback' });
-      reportMetric('command_fail', 1, { step: 'reply-audit-fallback' });
-    }
-  }
-}
-
-function commandReplyOptions(ctx: CommandContext): { replyTo: string; replyInThread?: true } {
-  return {
-    replyTo: ctx.msg.messageId,
-    ...(ctx.chatMode === 'topic' && ctx.msg.threadId ? { replyInThread: true as const } : {}),
-  };
-}
-
-function isMessageAuditReject(err: unknown): boolean {
-  if (!err || typeof err !== 'object') return false;
-  const record = err as Record<string, unknown>;
-  if (record.code === 230028) return true;
-  const message = String(record.message ?? record.msg ?? '');
-  return /not pass the audit/i.test(message);
-}
-
-function isAbsoluteOrTilde(p: string): boolean {
-  return isAbsolute(p) || p === '~' || p.startsWith('~/');
-}
-
-async function handleNew(args: string, ctx: CommandContext): Promise<void> {
-  const trimmed = args.trim();
-
-  // /new chat [name]  — spin up a fresh group chat bound to a fresh session
-  if (trimmed === 'chat' || trimmed.startsWith('chat ')) {
-    const rawName = trimmed === 'chat' ? '' : trimmed.slice(5).trim();
-    return handleNewChat(rawName, ctx);
-  }
-
-  const wasRunning = ctx.activeRuns.interrupt(ctx.scope);
-  if (ctx.sessionCatalog && ctx.sessionCatalogIdentity) {
-    ctx.sessionCatalog.archiveActive({
-      ...ctx.sessionCatalogIdentity,
-      now: Date.now(),
-    });
-  }
-  ctx.sessions.clear(ctx.scope);
-  await reply(ctx, wasRunning ? '已中断当前任务并开始新会话。' : '已开始新会话。');
-}
-
-async function handleNewChat(rawName: string, ctx: CommandContext): Promise<void> {
-  const sourceCwd = effectiveWorkspaceCwd(ctx);
-  const name = rawName || defaultChatName(ctx.agent.displayName);
-
-  let created;
-  try {
-    created = await createBoundChat({
-      channel: ctx.channel,
-      name,
-      inviteOpenId: ctx.msg.senderId,
-    });
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    await reply(ctx, `❌ 创建群失败：${msg}\n\n确认 bot 已开启 \`im:chat\` 权限。`);
-    return;
-  }
-
-  // Inherit cwd from the originating chat so the new group starts in the
-  // same workspace; otherwise it'll fall back to $HOME.
-  if (sourceCwd) {
-    ctx.workspaces.setCwd(created.chatId, sourceCwd);
-  }
-
-  // Welcome the user inside the new group with a hint about how to start.
-  const welcome = sourceCwd
-    ? `🎉 群已建好，cwd 继承自原群：\`${sourceCwd}\`\n\n@我 + 任意消息开始对话。`
-    : '🎉 群已建好。\n\n@我 + 任意消息开始对话。';
-  try {
-    await ctx.channel.send(created.chatId, { markdown: welcome });
-  } catch (err) {
-    console.warn('[new-chat] welcome message failed:', err);
-  }
-
-  await reply(
-    ctx,
-    `✓ 已创建群 **${created.name}**，去新群里继续。`,
-  );
-}
-
-async function handleCd(args: string, ctx: CommandContext): Promise<void> {
-  const input = args.trim();
-  if (!input) {
-    await reply(ctx, '用法：`/cd <绝对路径>` 或 `/cd ~/xxx`');
-    return;
-  }
-  if (!isAbsoluteOrTilde(input)) {
-    await reply(ctx, '请使用绝对路径，或 `~/xxx` 表示 home 下的子路径。');
-    return;
-  }
-  const absolute = expandHome(input);
-  const workspace = await resolveWorkingDirectory(absolute);
-  if (!workspace.ok) {
-    await reply(ctx, workspace.userVisible);
-    return;
-  }
-  ctx.activeRuns.interrupt(ctx.scope);
-  ctx.workspaces.setCwd(ctx.scope, workspace.cwdRealpath);
-  ctx.sessions.clear(ctx.scope);
-  await reply(ctx, `✓ 已切换 cwd 到 \`${workspace.cwdRealpath}\`\n（session 已重置）`);
-}
-
-async function handleWs(args: string, ctx: CommandContext): Promise<void> {
-  const parts = args.trim().split(/\s+/);
-  const sub = parts[0] ?? '';
-  const name = parts.slice(1).join(' ').trim();
-  switch (sub) {
-    case '':
-    case 'list':
-      return handleWsList(ctx);
-    case 'save':
-      return handleWsSave(name, ctx);
-    case 'use':
-      return handleWsUse(name, ctx);
-    case 'remove':
-    case 'rm':
-      return handleWsRemove(name, ctx);
-    default:
-      await reply(ctx, '用法：`/ws [list|save <name>|use <name>|remove <name>]`');
-  }
-}
-
-async function handleWsList(ctx: CommandContext): Promise<void> {
-  const named = listScopedWorkspaces(ctx);
-  const currentCwd = effectiveWorkspaceCwd(ctx);
-  const card = workspacesCard(
-    currentCwd,
-    named,
-  );
-  await ctx.channel.send(ctx.msg.chatId, { card }, commandReplyOptions(ctx));
-}
-
-async function handleWsSave(name: string, ctx: CommandContext): Promise<void> {
-  if (!name) {
-    await reply(ctx, '用法：`/ws save <name>`');
-    return;
-  }
-  const cwd = effectiveWorkspaceCwd(ctx);
-  if (!cwd) {
-    await reply(ctx, '当前 chat 未设置 cwd，先用 `/cd` 设置再保存。');
-    return;
-  }
-  ctx.workspaces.saveNamed(scopedWorkspaceName(ctx, name), cwd);
-  await reply(ctx, `✓ 工作目录别名已保存：\`${name}\` → ${cwd}`);
-}
-
-async function handleWsUse(name: string, ctx: CommandContext): Promise<void> {
-  if (!name) {
-    await reply(ctx, '用法：`/ws use <name>`');
-    return;
-  }
-  const cwd = getWorkspaceAlias(ctx, name);
-  if (!cwd) {
-    await reply(ctx, `未找到工作目录别名：\`${name}\``);
-    return;
-  }
-  const workspace = await resolveWorkingDirectory(cwd);
-  if (!workspace.ok) {
-    await reply(ctx, workspace.userVisible);
-    return;
-  }
-  ctx.activeRuns.interrupt(ctx.scope);
-  ctx.workspaces.setCwd(ctx.scope, workspace.cwdRealpath);
-  ctx.sessions.clear(ctx.scope);
-  await reply(ctx, `✓ 已切换到 \`${name}\` (${workspace.cwdRealpath})\n（session 已重置）`);
-}
-
-async function handleWsRemove(name: string, ctx: CommandContext): Promise<void> {
-  if (!name) {
-    await reply(ctx, '用法：`/ws remove <name>`');
-    return;
-  }
-  if (!removeWorkspaceAlias(ctx, name)) {
-    await reply(ctx, `未找到工作目录别名：\`${name}\``);
-    return;
-  }
-  await reply(ctx, `✓ 已删除工作目录别名：\`${name}\``);
-}
-
-async function handleDoc(args: string, ctx: CommandContext): Promise<void> {
-  void args;
-  await reply(ctx, '云文档评论现在不需要绑定工作区；在支持的文档评论里 @bot 即可触发回复。');
-}
-
-const WORKSPACE_NAME_SEPARATOR = '\u001f';
-
-function scopedWorkspaceName(ctx: CommandContext, name: string): string {
-  return [
-    ctx.controls.profile,
-    ctx.controls.botOwnerId ?? 'owner-unknown',
-    ctx.scope,
-    name,
-  ].join(WORKSPACE_NAME_SEPARATOR);
-}
-
-function workspaceAliasKeys(ctx: CommandContext, name: string): string[] {
-  return [scopedWorkspaceName(ctx, name), name];
-}
-
-function getWorkspaceAlias(ctx: CommandContext, name: string): string | undefined {
-  for (const key of workspaceAliasKeys(ctx, name)) {
-    const cwd = ctx.workspaces.getNamed(key);
-    if (cwd) return cwd;
-  }
-  return undefined;
-}
-
-function removeWorkspaceAlias(ctx: CommandContext, name: string): boolean {
-  const scopedKey = scopedWorkspaceName(ctx, name);
-  if (ctx.workspaces.removeNamed(scopedKey)) return true;
-  return ctx.workspaces.removeNamed(name);
-}
-
-function isLegacyWorkspaceAlias(key: string): boolean {
-  return key !== '' && !key.includes(WORKSPACE_NAME_SEPARATOR);
-}
-
-function listScopedWorkspaces(ctx: CommandContext): Record<string, string> {
-  const prefix = scopedWorkspaceName(ctx, '');
-  const named = ctx.workspaces.listNamed();
-  const scoped: Record<string, string> = {};
-  for (const [key, cwd] of Object.entries(named)) {
-    if (!key.startsWith(prefix)) continue;
-    const displayName = key.slice(prefix.length);
-    if (displayName) scoped[displayName] = cwd;
-  }
-  for (const [key, cwd] of Object.entries(named)) {
-    if (isLegacyWorkspaceAlias(key) && scoped[key] === undefined) scoped[key] = cwd;
-  }
-  return scoped;
-}
-
-async function handleResume(args: string, ctx: CommandContext): Promise<void> {
-  const parts = args.trim().split(/\s+/).filter(Boolean);
-  const sub = parts[0] ?? '';
-  const rest = parts.slice(1).join(' ').trim();
-
-  if (sub === 'use' && rest) {
-    return applyResume(rest, ctx);
-  }
-
-  // Default: list recent sessions
-  const n = Number.parseInt(sub, 10);
-  const limit = Number.isFinite(n) && n > 0 && n <= 20 ? n : 5;
-
-  const cwd = selectedResumeCwd(ctx);
-  if (!cwd) {
-    await reply(ctx, '请先使用 /cd <path> 选择工作目录，再查看或恢复会话。');
-    return;
-  }
-
-  if (ctx.chatMode !== 'p2p') {
-    await reply(ctx, '群聊中不展示历史会话详情。请私聊 bot 使用 `/resume` 查看和选择历史会话。');
-    return;
-  }
-
-  await RESUME_LISTS[ctx.controls.profileConfig.agentKind](ctx, cwd, limit, sub);
-}
-
-/**
- * `/resume` listing per agent: each reads its own CLI's history and issues
- * resume candidates keyed by that agent's session handle.
- */
-const RESUME_LISTS: Record<AgentKind, (ctx: CommandContext, cwd: string, limit: number, sub: string) => Promise<void>> = {
-  claude: sendClaudeResumeList,
-  codex: sendCodexResumeList,
-};
-
-async function sendCodexResumeList(ctx: CommandContext, cwd: string, limit: number): Promise<void> {
-  const identity = ctx.sessionCatalogIdentity;
-  const entry =
-    ctx.sessionCatalog && identity
-      ? ctx.sessionCatalog.activeFor(identity)
-      : undefined;
-  const history = identity ? await listCodexResumeHistory(ctx, cwd, limit) : [];
-  if (history.length > 0 && identity) {
-    const entries = history.map((thread) => {
-      const nonce = issueResumeCandidate(identity, { threadId: thread.threadId });
-      return {
-        sessionId: nonce,
-        preview: thread.name || thread.preview,
-        relTime: formatRelTime(thread.updatedAtMs),
-        detail: `Codex · ${thread.source}`,
-        current: thread.threadId === entry?.threadId,
-      };
-    });
-    const card = resumeCard(cwd, entries);
-    await ctx.channel.send(ctx.msg.chatId, { card }, commandReplyOptions(ctx));
-    return;
-  }
-  if (entry?.threadId && identity) {
-    const nonce = issueResumeCandidate(identity, { threadId: entry.threadId });
-    await reply(
-      ctx,
-      `当前 Codex thread 可恢复。\n使用 \`/resume use ${nonce}\` 恢复（10 分钟内有效）。`,
-    );
-    return;
-  }
-  const card = resumeCard(cwd, []);
-  await ctx.channel.send(ctx.msg.chatId, { card }, commandReplyOptions(ctx));
-}
-
-async function sendClaudeResumeList(ctx: CommandContext, cwd: string, limit: number, sub = ''): Promise<void> {
-  // Only this chat's own conversations: every chat shares the workspace, so
-  // the unfiltered list would let anyone resume (and read back) someone
-  // else's session. The owner can still see everything with `/resume all`.
-  const showAll =
-    sub === 'all' && canRunAdminCommand(ctx.controls.profileConfig, ctx.controls, ctx.msg.senderId).ok;
-  const own = scopeSessionIds(ctx);
-  const sessions = showAll
-    ? await listClaudeResumeHistory(ctx, cwd, RESUME_SCAN_LIMIT).then((all) => all.slice(0, 20))
-    : (await listClaudeResumeHistory(ctx, cwd, RESUME_SCAN_LIMIT))
-        .filter((s) => own.has(s.sessionId))
-        .slice(0, limit);
-  const currentSession = ctx.sessions.getRaw(ctx.scope);
-  const identity = ctx.sessionCatalogIdentity;
-  const entries = sessions.map((s) => ({
-    sessionId: identity
-      ? issueResumeCandidate(identity, { sessionId: s.sessionId })
-      : s.sessionId,
-    displayId: s.sessionId,
-    preview: s.preview,
-    relTime: formatRelTime(s.mtime),
-    lineCount: s.lineCount,
-    current: s.sessionId === currentSession?.sessionId,
-  }));
-  const card = resumeCard(cwd, entries);
-  await ctx.channel.send(ctx.msg.chatId, { card }, commandReplyOptions(ctx));
-}
-
-async function applyResume(sessionId: string, ctx: CommandContext): Promise<void> {
-  const descriptor = agentDescriptor(ctx.controls.profileConfig.agentKind);
-  if (ctx.sessionCatalog && ctx.sessionCatalogIdentity) {
-    const identity = ctx.sessionCatalogIdentity;
-    const entry = ctx.sessionCatalog.activeFor(identity);
-    const resolved = consumeResumeCandidate(sessionId, identity);
-    const handleField = agentDescriptor(identity.agentId).sessionHandle;
-    const handle = resolved?.[handleField];
-    if (handle) {
-      ctx.activeRuns.interrupt(ctx.scope);
-      ctx.sessionCatalog.upsertActive({
-        scopeId: identity.scopeId,
-        agentId: identity.agentId,
-        cwdRealpath: identity.cwdRealpath,
-        policyFingerprint: identity.policyFingerprint,
-        [handleField]: handle,
-      });
-      if (descriptor.scopeSessionStore) ctx.sessions.set(ctx.scope, handle, identity.cwdRealpath);
-      await reply(ctx, RESUME_APPLIED_REPLY);
-      return;
-    }
-    // Without a scope store there is no raw-id path: only a fresh candidate resumes.
-    if (!descriptor.scopeSessionStore) {
-      await reply(ctx, '当前上下文不可恢复这个会话，请先用 `/resume` 重新生成恢复候选。');
-      return;
-    }
-    const expected = entry?.[handleField];
-    if (expected !== sessionId) {
-      await reply(ctx, '当前上下文不可恢复这个会话，请重新选择当前工作区和权限策略下的会话。');
-      return;
-    }
-    ctx.activeRuns.interrupt(ctx.scope);
-    ctx.sessions.set(ctx.scope, sessionId, identity.cwdRealpath);
-    await reply(ctx, RESUME_APPLIED_REPLY);
-    return;
-  }
-
-  if (!descriptor.scopeSessionStore) {
-    await reply(ctx, `当前上下文没有可恢复的 ${descriptor.displayName} 会话，请先在当前工作区完成一次运行。`);
-    return;
-  }
-
-  const cwd = selectedResumeCwd(ctx);
-  if (!cwd) {
-    await reply(ctx, '请先使用 /cd <path> 选择工作目录，再查看或恢复会话。');
-    return;
-  }
-  ctx.activeRuns.interrupt(ctx.scope);
-  ctx.sessions.set(ctx.scope, sessionId, cwd);
-  await reply(ctx, RESUME_APPLIED_REPLY);
-}
-
-function issueResumeCandidate(
-  identity: SessionCatalogIdentity,
-  target: { sessionId: string } | { threadId: string },
-): string {
-  pruneResumeCandidates();
-  let nonce = randomUUID().slice(0, 12);
-  while (resumeCandidates.has(nonce)) nonce = randomUUID().slice(0, 12);
-  resumeCandidates.set(nonce, {
-    scopeId: identity.scopeId,
-    agentId: identity.agentId,
-    cwdRealpath: identity.cwdRealpath,
-    policyFingerprint: identity.policyFingerprint,
-    ...target,
-    expiresAt: Date.now() + RESUME_CANDIDATE_TTL_MS,
-  });
-  return nonce;
-}
-
-function consumeResumeCandidate(
-  nonce: string,
-  identity: SessionCatalogIdentity,
-): ResumeCandidate | undefined {
-  pruneResumeCandidates();
-  const candidate = resumeCandidates.get(nonce);
-  if (!candidate) return undefined;
-  resumeCandidates.delete(nonce);
-  if (
-    candidate.scopeId !== identity.scopeId ||
-    candidate.agentId !== identity.agentId ||
-    candidate.cwdRealpath !== identity.cwdRealpath ||
-    candidate.policyFingerprint !== identity.policyFingerprint ||
-    !candidate[agentDescriptor(identity.agentId).sessionHandle]
-  ) {
-    return undefined;
-  }
-  return candidate;
-}
-
-function pruneResumeCandidates(now = Date.now()): void {
-  for (const [nonce, candidate] of resumeCandidates.entries()) {
-    if (candidate.expiresAt <= now) resumeCandidates.delete(nonce);
-  }
-}
-
-/** How far back `/resume` looks before keeping only this chat's sessions. */
-const RESUME_SCAN_LIMIT = 200;
-
-/** Claude sessions this chat has used: its current one and any it moved on from. */
-function scopeSessionIds(ctx: CommandContext): Set<string> {
-  const ids = new Set<string>();
-  const current = ctx.sessions.getRaw(ctx.scope)?.sessionId;
-  if (current) ids.add(current);
-  for (const entry of ctx.sessionCatalog?.entries() ?? []) {
-    if (entry.scopeId === ctx.scope && entry.agentId === ctx.controls.profileConfig.agentKind && entry.sessionId) {
-      ids.add(entry.sessionId);
-    }
-  }
-  return ids;
-}
-
-async function listClaudeResumeHistory(
-  ctx: CommandContext,
-  cwd: string,
-  limit: number,
-): Promise<SessionSummary[]> {
-  const provider = ctx.claudeHistoryProvider ?? listRecentSessions;
-  return provider(cwd, limit);
-}
-
-async function listCodexResumeHistory(
-  ctx: CommandContext,
-  cwd: string,
-  limit: number,
-): Promise<CodexThreadHistoryEntry[]> {
-  const codex = ctx.controls.profileConfig.codex;
-  const binary = codex?.binaryPath;
-  if (!binary) return [];
-
-  const provider = ctx.codexHistoryProvider ?? listCodexThreadHistory;
-  try {
-    return await provider({
-      binary,
-      cwd,
-      limit,
-      profileStateDir: commandProfilePaths(ctx).profileDir,
-      ...(codex.codexHome ? { codexHome: codex.codexHome } : {}),
-      ...(codex.inheritCodexHome !== undefined
-        ? { inheritCodexHome: codex.inheritCodexHome }
-        : {}),
-    });
-  } catch (err) {
-    log.warn('session', 'codex-history-failed', {
-      message: err instanceof Error ? err.message : String(err),
-    });
-    return [];
-  }
-}
-
-function effectiveWorkspaceCwd(ctx: CommandContext): string | undefined {
-  return ctx.workspaces.cwdFor(ctx.scope) ?? ctx.controls.profileConfig.workspaces.default;
-}
-
-function selectedResumeCwd(ctx: CommandContext): string | undefined {
-  return effectiveWorkspaceCwd(ctx);
 }
 
 function runtimeAccessStatus(
@@ -3839,13 +3326,6 @@ function configFailureMessage(step: string, rollbackFailed: boolean, larkCliPoli
     return 'lark-cli 身份策略未生效，未做任何修改。';
   }
   return '配置未写入，未做任何修改。';
-}
-
-function commandProfilePaths(ctx: CommandContext) {
-  return resolveAppPaths({
-    rootDir: dirname(ctx.controls.configPath),
-    profile: ctx.controls.profile,
-  });
 }
 
 async function applyConfigLarkCliIdentityPolicy(

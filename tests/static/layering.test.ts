@@ -82,9 +82,9 @@ const upwardEdges = (): string[] => {
 const KNOWN_UPWARD: string[] = [
   'src/agent/codex/adapter.ts -> src/runtime/errors.ts',
   'src/agent/codex/app-server-run.ts -> src/runtime/approvals.ts',
+  'src/commands/handlers/workspace.ts -> src/bot/group.ts',
   'src/commands/index.ts -> src/bot/app-scope.ts',
   'src/commands/index.ts -> src/bot/auto-resume.ts',
-  'src/commands/index.ts -> src/bot/group.ts',
   'src/commands/index.ts -> src/bot/lark-info.ts',
   'src/commands/index.ts -> src/bot/run-status.ts',
   'src/commands/index.ts -> src/bot/wizard.ts',

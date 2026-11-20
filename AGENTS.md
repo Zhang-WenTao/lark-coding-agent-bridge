@@ -46,7 +46,7 @@
 | `src/runtime/` | `run-executor`（提交 run、`done` 后回收进程）、运行锁、在线 bot 注册表、adapter 工厂、active-runs、进程池 |
 | `src/agent/` | **agent 注册表 `registry.ts`**、各 agent adapter（`claude/`、`codex/`）、capability、模型目录、preflight、系统提示词 |
 | `src/bot/` | 飞书消息入口 `channel.ts`（排队、合并、回复投递）、`run-flow.ts`（策略 + 恢复会话 + 提交 run）、云文档评论、进程池、卡片流 |
-| `src/commands/` | 飞书内斜杠命令（`handlers` 表、`ADMIN_COMMANDS` 权限表） |
+| `src/commands/` | 飞书内斜杠命令：`index.ts` 放 `handlers` 表、`ADMIN_COMMANDS` 权限表与分发，各命令实现在 `handlers/<组>.ts`，共用的回复/路径小工具在 `shared.ts` |
 | `src/card/` | 卡片模板、运行卡渲染、配置卡、卡片回调签名与分发 |
 | `src/session/` | per-scope `SessionStore`、`SessionCatalog`（按 scope+agent+cwd+策略指纹）、Claude / Codex 历史读取 |
 | `src/policy/` | 访问控制（owner / admin / 名单）、run 策略、策略指纹 |
@@ -96,7 +96,7 @@
    - `src/runtime/agent-runtime.ts` → `ADAPTER_FACTORIES`（构造 adapter）
    - `src/agent/models.ts` → `MODEL_CATALOGS`（模型 / effort 选项、实际模型名展示）
    - `src/agent/account.ts` → `ACCOUNT_NAMES`（回复卡 Sponsor）
-   - `src/commands/index.ts` → `RESUME_LISTS`（`/resume` 列表）
+   - `src/commands/handlers/resume.ts` → `RESUME_LISTS`（`/resume` 列表）
 3. 新建 `src/agent/<id>/adapter.ts` 实现 `AgentAdapter`（`src/agent/types.ts`）：spawn CLI、prompt 走 stdin、按行解析输出并翻译成 `AgentEvent`；每轮结束恰好一个 `done`（或 `error`），`system` / `done` 事件带上描述里声明的会话句柄字段；实现 `waitForExit` 与带宽限期的 `stop`。
 4. 测试：真实输出抓样本 → translator 单测；fake binary 读流测试（参照 `tests/unit/agent/claude-stream-json.test.ts`）；进程级契约测试（参照 `tests/process/`）。
 5. 如果新 agent 需要自己的配置段（像 `codex.binaryPath`），在 `src/config/profile-schema.ts` 加类型、校验和默认值，bootstrap 在 `src/cli/profile-bootstrap.ts`。
