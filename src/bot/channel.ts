@@ -2086,43 +2086,41 @@ function planBatchAutoEffort(
   return { modelPin, autoEffortPlan };
 }
 
-async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
+/**
+ * Everything the agent is told for a batch: the group / topic context around
+ * it, the instructions (model switch, guest fence, edits, background work),
+ * the knowledge block and the prompt itself — plus the decisions made on the
+ * way (owner run, guard, workspace) that submitting the run needs.
+ */
+async function prepareBatchPrompt(
+  deps: RunBatchDeps,
+  input: {
+    firstMsg: NormalizedMessage;
+    chatId: string;
+    threadId: string | undefined;
+    attachments: LocalAttachment[];
+    batchIds: Set<string>;
+    quoteTargets: string[];
+    quotes: QuotedContext[];
+    modelPin: ReturnType<NonNullable<Controls['modelPins']>['get']>;
+    autoEffortPlan: AutoEffortPlan | undefined;
+  },
+) {
   const {
     channel,
     executor,
     sessions,
-    sessionCatalog,
     workspaces,
     batch,
     controls,
-    cotClient,
-    callbackAuth,
-    activePolicyFingerprints,
     lastRunModelByScope,
-    pendingRotations,
     backgroundOrigins,
     contextCursors,
     scope,
     mode,
-    runs,
     knowledge,
-    autoResumer,
   } = deps;
-  if (batch.length === 0) return;
-  const firstMsg = batch[0];
-  const lastMsg = batch[batch.length - 1];
-  if (!firstMsg || !lastMsg) return;
-
-  const chatId = firstMsg.chatId;
-  const threadId = firstMsg.threadId;
-
-  if (await stopForBotOverload(deps, { chatId, threadId, lastMsg })) return;
-
-  const { attachments, batchIds, quoteTargets, quotes } = await resolveBatchInputs(deps);
-
-  const { modelPin, autoEffortPlan } = planBatchAutoEffort(deps, { chatId, attachments, quotes });
-  const run: BatchRunState = { backgroundSettled: false, answerIsNewMessage: false };
-
+  const { firstMsg, chatId, threadId, attachments, batchIds, quoteTargets, quotes, modelPin, autoEffortPlan } = input;
   // 群聊 / 话题上下文: Feishu only delivers the group messages that @ the bot,
   // so read back what was said around them — see chat-context.ts for which
   // slice each situation gets.
@@ -2294,6 +2292,79 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     quotes: quotes.length,
     chatContext: chatContext?.messages.length ?? 0,
     ...(modelSwitched ? { modelSwitchedTo: modelSelection } : {}),
+  });
+  return {
+    contextUntilMs,
+    agentKind,
+    modelPref,
+    requestedModel,
+    smartSession,
+    waitingOrigins,
+    ownerRun,
+    restrictedCwd,
+    runGuard,
+    knowledgeDedupe,
+    prompt,
+  };
+}
+
+async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
+  const {
+    channel,
+    executor,
+    sessions,
+    sessionCatalog,
+    workspaces,
+    batch,
+    controls,
+    cotClient,
+    callbackAuth,
+    activePolicyFingerprints,
+    pendingRotations,
+    backgroundOrigins,
+    contextCursors,
+    scope,
+    mode,
+    runs,
+    autoResumer,
+  } = deps;
+  if (batch.length === 0) return;
+  const firstMsg = batch[0];
+  const lastMsg = batch[batch.length - 1];
+  if (!firstMsg || !lastMsg) return;
+
+  const chatId = firstMsg.chatId;
+  const threadId = firstMsg.threadId;
+
+  if (await stopForBotOverload(deps, { chatId, threadId, lastMsg })) return;
+
+  const { attachments, batchIds, quoteTargets, quotes } = await resolveBatchInputs(deps);
+
+  const { modelPin, autoEffortPlan } = planBatchAutoEffort(deps, { chatId, attachments, quotes });
+  const run: BatchRunState = { backgroundSettled: false, answerIsNewMessage: false };
+
+  const {
+    contextUntilMs,
+    agentKind,
+    modelPref,
+    requestedModel,
+    smartSession,
+    waitingOrigins,
+    ownerRun,
+    restrictedCwd,
+    runGuard,
+    knowledgeDedupe,
+    prompt,
+  } = await prepareBatchPrompt(deps, {
+    firstMsg,
+    chatId,
+    threadId,
+    attachments,
+    batchIds,
+    quoteTargets,
+    quotes,
+    modelPin,
+    autoEffortPlan,
   });
 
   // For topic groups: thread the reply so it lands in the same topic as the
