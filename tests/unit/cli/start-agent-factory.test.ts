@@ -85,15 +85,24 @@ describe('start runtime agent factory', () => {
   it('shuts down the supervisor (releasing profile locks) before exiting', async () => {
     // Graceful shutdown: the supervisor stops all channels (releasing each
     // profile's locks) before the process exits.
+    // The teardown lives in close(), shared by the signal path (exit 0) and
+    // the uncaught-exception path (exit 1, see crash-exit.ts).
     const source = await readFile(join(process.cwd(), 'src/cli/commands/start.ts'), 'utf8');
-    const stopStart = source.indexOf('const shutdown = async');
-    const shutdownIndex = source.indexOf('await supervisor.shutdown()', stopStart);
+    const closeStart = source.indexOf('const close = async');
+    const supervisorIndex = source.indexOf('await supervisor.shutdown()', closeStart);
+    const stopStart = source.indexOf('const shutdown = async', closeStart);
+    const closeCallIndex = source.indexOf('await close()', stopStart);
     const exitIndex = source.indexOf('process.exit(0)', stopStart);
+    const crashStart = source.indexOf('orderlyShutdown = async', stopStart);
+    const crashCloseIndex = source.indexOf('await close()', crashStart);
 
-    expect(stopStart).toBeGreaterThanOrEqual(0);
-    expect(shutdownIndex).toBeGreaterThanOrEqual(0);
-    expect(exitIndex).toBeGreaterThanOrEqual(0);
-    expect(shutdownIndex).toBeLessThan(exitIndex);
+    expect(closeStart).toBeGreaterThanOrEqual(0);
+    expect(supervisorIndex).toBeGreaterThan(closeStart);
+    expect(supervisorIndex).toBeLessThan(stopStart);
+    expect(closeCallIndex).toBeGreaterThan(stopStart);
+    expect(closeCallIndex).toBeLessThan(exitIndex);
+    expect(crashStart).toBeGreaterThan(exitIndex);
+    expect(crashCloseIndex).toBeGreaterThan(crashStart);
 
     // And each channel's teardown releases its runtime locks.
     const sup = await readFile(join(process.cwd(), 'src/app/supervisor.ts'), 'utf8');
