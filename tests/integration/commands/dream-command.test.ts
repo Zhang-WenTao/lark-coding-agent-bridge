@@ -129,6 +129,23 @@ function texts(channel: FakeChannel): string {
   return JSON.stringify(channel.sent.map((m) => m.content));
 }
 
+describe('/dream (renamed)', () => {
+  it('only points to /practice and runs nothing', async () => {
+    const h = await createHarness();
+    await h.run('/dream run');
+    expect(h.dream.start).not.toHaveBeenCalled();
+    expect(h.dream.status).not.toHaveBeenCalled();
+    expect(texts(h.channel)).toContain('已改名为');
+    expect(texts(h.channel)).toContain('/practice run');
+  });
+
+  it('is still for admins only', async () => {
+    const h = await createHarness();
+    await h.run('/dream', { senderId: 'ou-member' });
+    expect(texts(h.channel)).not.toContain('已改名为');
+  });
+});
+
 describe('/practice', () => {
   it('is for admins only', async () => {
     const h = await createHarness();

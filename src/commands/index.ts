@@ -63,6 +63,8 @@ const handlers: Record<string, Handler> = {
   '/usage': handleUsage,
   '/audit': handleAudit,
   '/practice': handleDream,
+  // Renamed to /practice (11-20); only says so, does nothing else.
+  '/dream': (args, ctx) => reply(ctx, `\`/dream\` 已改名为 \`/practice\`，用法不变：发 \`/practice${args.trim() ? ` ${args.trim()}` : ''}\`。`),
   // Card buttons of approval prompts (not typed by people; see ApprovalBroker).
   '/approval': handleApproval,
 };
@@ -104,6 +106,7 @@ const ADMIN_COMMANDS = new Set([
   '/audit',
   // Reads every chat's conversations and opens PRs against shared repositories.
   '/practice',
+  '/dream',
 ]);
 
 function isAdminCommand(cmd: string): boolean {
