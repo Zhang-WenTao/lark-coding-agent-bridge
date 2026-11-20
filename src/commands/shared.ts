@@ -51,3 +51,20 @@ export function commandProfilePaths(ctx: CommandContext) {
     profile: ctx.controls.profile,
   });
 }
+
+// Lark's client holds a local "form just submitted" state for a short
+// window after the click that overrides any cardkit.card.update we issue.
+// We always wait at least this long before flipping the form card to its
+// terminal (success/failure) state. Empirically ~1s is enough; less than
+// that and the update gets reverted to the form's pre-submit state.
+export const FORM_SETTLE_MS = 1000;
+
+export async function recallMessage(ctx: CommandContext, messageId: string): Promise<void> {
+  try {
+    await ctx.channel.recallMessage(messageId);
+  } catch (err) {
+    console.warn('[recall failed]', err);
+  }
+}
+
+// ────────────── /invite and /remove — access lists ──────────────
