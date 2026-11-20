@@ -1,4 +1,4 @@
-import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -133,5 +133,23 @@ describe('JSON state stores keep a corrupt file instead of overwriting it', () =
     await writeFile(path, '{not json');
     await new DreamStateStore(path).load(Date.now(), { readOnly: true });
     expect(await readdir(dir)).toEqual(['state.json']);
+  });
+
+  it('jobs: a corrupt file that cannot be moved aside is never saved over (review-2 R4)', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'jobs-ro-'));
+    dirs.push(dir);
+    const path = join(dir, 'jobs.json');
+    await writeFile(path, '{not json');
+    await chmod(dir, 0o500); // rename (move aside) fails
+    const store = new JobStore(path);
+    try {
+      await store.load();
+    } finally {
+      await chmod(dir, 0o700); // a later save would now succeed
+    }
+    store.remove('none');
+    await store.flush();
+    expect(await readFile(path, 'utf8')).toBe('{not json');
+    expect(await readdir(dir)).toEqual(['jobs.json']);
   });
 });

@@ -18,6 +18,8 @@ interface JobData {
 export class JobStore {
   private data: JobData = { jobs: {} };
   private readonly file: JsonFile;
+  /** Set when a corrupt jobs file could not be moved aside (see constructor). */
+  private readOnly = false;
 
   constructor(path: string = paths.jobsFile) {
     this.file = new JsonFile(path, {
@@ -28,6 +30,12 @@ export class JobStore {
         // works, the operator finds the reason in the log, and the original is
         // kept at `movedTo` instead of being overwritten by the next save.
         log.warn('scheduler', 'jobs-parse-failed', { path, movedTo, err: String(err) });
+        // Could not move it aside: it is still the only copy, so this process
+        // must not save over it. Jobs added now last until the next restart.
+        if (!movedTo) {
+          this.readOnly = true;
+          log.fail('scheduler', err, { step: 'load', path, note: 'corrupt jobs file kept in place; saves disabled' });
+        }
       },
       onPersistError: (err) => log.fail('scheduler', err, { step: 'persist' }),
     });
@@ -105,6 +113,7 @@ export class JobStore {
   }
 
   private schedulePersist(): void {
+    if (this.readOnly) return;
     this.file.write(`${JSON.stringify(this.data, null, 2)}\n`);
   }
 }

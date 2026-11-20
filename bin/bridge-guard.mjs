@@ -212,6 +212,9 @@ function isGitListing(sub, rest) {
       return plain.length === 0 || ['get-url', 'show'].includes(plain[0]);
     case 'stash':
       return ['list', 'show'].includes(plain[0]);
+    case 'archive':
+      // Only `-o` / `--output` writes a file; otherwise it goes to stdout.
+      return !words.some((w) => /^(?:-o|--output(?:=.*)?)$/.test(w) || /^-o./.test(w));
     case 'worktree':
       return plain[0] === 'list';
     case 'submodule':
@@ -433,12 +436,64 @@ function runsCommand(raw) {
   return false;
 }
 
-// The command's own output is run (`grep -oh … f | sh`, `$(grep …)`, `eval`,
-// `xargs`): what a search "looks for" may then be the command itself.
-const RUNS_OUTPUT = /\|\s*(?:sudo\s+)?(?:env\s+)?(?:\S*\/)?(?:ba|z|da|k|c|tc|fi)?sh\b|\b(?:eval|xargs|source)\b/;
+const SHELLS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh', 'csh', 'tcsh', 'fish']);
+// What `xargs` may run on a search's output without running the output itself.
+const XARGS_READS = new Set([
+  'grep', 'egrep', 'fgrep', 'zgrep', 'rg', 'ag', 'ack', 'wc', 'ls', 'cat', 'head', 'tail', 'file', 'stat',
+  'du', 'basename', 'dirname', 'realpath', 'readlink', 'sort', 'uniq', 'jq', 'echo', 'printf', 'md5',
+  'shasum', 'sha256sum', 'sha1sum', 'less', 'more', 'nl', 'od', 'xxd', 'hexdump', 'strings', 'diff',
+]);
+const XARGS_ARG_FLAGS = /^-[nIPLsEdJR]$/;
 
+/** The words of a segment from its command word on (prefixes like `sudo -u x`, `env A=1` skipped). */
+function commandWords(segment) {
+  const words = segment.trim().replace(/^[({!\s]+/, '').split(/\s+/).filter(Boolean);
+  let i = 0;
+  for (;;) {
+    const w = words[i];
+    if (w === undefined) break;
+    if (/^[A-Za-z_]\w*=/.test(w) || ['command', 'builtin', 'exec', 'nohup', 'time', 'nice'].includes(w)) {
+      i++;
+    } else if (w === 'sudo' || w === 'env') {
+      i++;
+      while (words[i]?.startsWith('-') || (w === 'env' && /^[A-Za-z_]\w*=/.test(words[i] ?? ''))) {
+        if (w === 'sudo' && /^-[ugCghpUrt]$/.test(words[i])) i++;
+        i++;
+      }
+    } else break;
+  }
+  return words.slice(i);
+}
+
+const base = (w) => (w ?? '').replace(/^['"]|['"]$/g, '').split('/').pop();
+
+/**
+ * Is the command's own output run (`grep -oh … f | sh`, `… | xargs sh -c`,
+ * `$(grep …)` as a command, `eval "$(grep …)"`)? Then what a search "looks
+ * for" may be the command itself. `cmd` has its search patterns blanked, so
+ * a `|` or `sh` inside a pattern counts for nothing. A `$(…)` that is only
+ * an argument (`cd $(git rev-parse …)`) runs no search output.
+ */
 function runsOutput(cmd) {
-  return RUNS_OUTPUT.test(cmd) || runsCommand(cmd);
+  const parts = cmd.split(/(\|\||&&|;|\||\n)/);
+  for (let p = 0; p < parts.length; p += 2) {
+    const segment = parts[p];
+    const piped = parts[p - 1] === '|';
+    const words = commandWords(segment);
+    if (words.length === 0) continue;
+    const verb = base(words[0]);
+    // `$(grep …)`, `` `grep …` ``, `c=$(grep …); $c`: the command word is expanded text.
+    if (/^["']?[$`]/.test(words[0])) return true;
+    if (['eval', 'source', '.'].includes(verb) && runsCommand(segment)) return true;
+    if (SHELLS.has(verb) && (piped || runsCommand(segment))) return true;
+    if (verb === 'xargs' && piped) {
+      let k = 1;
+      while (words[k]?.startsWith('-')) k += XARGS_ARG_FLAGS.test(words[k]) ? 2 : 1;
+      const run = base(words[k]);
+      if (run && !XARGS_READS.has(run)) return true;
+    }
+  }
+  return false;
 }
 
 /** `cmd` with the patterns of search tools blanked out (same length). */
@@ -590,6 +645,11 @@ function cdTarget(segment, here) {
   return { dir: isAbsolute(target) ? resolve(target) : resolve(here, target) };
 }
 
+// `( cd x && … )`, `{ cd x; … }`, `if cd x; then touch y; fi`, `builtin cd x`:
+// grouping and keywords in front of a command change neither where it goes
+// nor what it writes.
+const LEAD = /^\s*(?:[({!]\s*|(?:if|then|else|elif|do|while|until|builtin|command)\s+)+/;
+
 function nextDir(segment, here) {
   const cd = cdTarget(segment, here);
   return cd?.dir ?? here;
@@ -600,33 +660,54 @@ function decideBash(command, cfg, cwd) {
   if (CONTROL.test(full)) return deny('这条命令会控制 bridge 进程（启停、重启或 launchd）');
   // What a search looks for is text: `git grep "INSERT INTO t"` and
   // `grep -r "kubectl delete" docs` run neither.
-  const searched = runsOutput(full) ? full : blankSearchPatterns(full);
+  const blanked = blankSearchPatterns(full);
+  const searched = runsOutput(blanked) ? full : blanked;
   for (const re of cfg.deniedCommands ?? []) {
     if (new RegExp(re).test(searched)) return deny('这条命令属于仅限主人的操作');
   }
   const cmd = blankSearchPatterns(stripDataHeredocs(full));
   const segments = cmd.split(SEGMENTS).filter((s) => s.trim());
   // Owner-only areas first, wherever they come in the command.
-  let here = cwd;
-  for (const segment of segments) {
+  const fencedRefusal = walkSegments(segments, cwd, (segment, here) => {
     const refused = fencedArea(segment, here, cfg);
-    if (refused) return refused;
+    if (refused) return { refused };
     const cd = cdTarget(segment, here);
     if (cd?.unknown) {
       // `cd "$RO"/x`: the target is not plain text. If it names a write-fenced
       // place, assume the shell is now inside it.
       const named = (cfg.rules ?? []).find((rule) => rule.bash === 'write' && mentioned(segment, rule) !== null);
-      if (named) here = named.path;
-    } else if (cd) here = cd.dir;
-  }
+      return { here: named ? named.path : here };
+    }
+    return { here: cd ? cd.dir : here };
+  });
+  if (fencedRefusal) return fencedRefusal;
   if (BARE_CD.test(cmd)) return deny('这条命令会进入主人的主目录');
   // Relative paths count from wherever the earlier `cd`s of this command left
   // the shell, so `cd a/b && ls ../..` stays in the workspace it started in.
-  here = cwd;
-  for (const segment of segments) {
+  return walkSegments(segments, cwd, (segment, here) => {
     const refused = outOfScope(segment, here, cfg);
-    if (refused) return refused;
-    here = nextDir(segment, here);
+    return refused ? { refused } : { here: nextDir(segment, here) };
+  });
+}
+
+const count = (text, c) => text.split(c).length - 1;
+
+/**
+ * Visit each segment with the directory the shell is in when it gets there.
+ * `( cd x && … )` moves only its subshell: the directory before the `(` is
+ * back after the `)`. `visit` returns `{ refused }` to stop, or the next `{ here }`.
+ */
+function walkSegments(segments, cwd, visit) {
+  let here = cwd;
+  const saved = [];
+  for (const raw of segments) {
+    const lead = raw.match(LEAD)?.[0] ?? '';
+    for (let n = count(lead, '('); n > 0; n--) saved.push(here);
+    const segment = raw.slice(lead.length);
+    const step = visit(segment, here);
+    if (step.refused) return step.refused;
+    here = step.here;
+    for (let n = count(segment, ')') - count(segment, '('); n > 0 && saved.length > 0; n--) here = saved.pop();
   }
   return null;
 }

@@ -263,6 +263,14 @@ describe('guest runs: writing from inside a read-only root', () => {
     ['pushd', `pushd ${READ_ONLY} && touch x`],
     ['a target built from a variable', `cd "$D"${READ_ONLY} && touch x`],
     ['ln with one path (link lands in cwd)', `cd ${READ_ONLY} && ln -s /tmp/evil`],
+    ['cd inside a subshell', `( cd ${READ_ONLY} && touch x )`],
+    ['cd inside braces', `{ cd ${READ_ONLY}; touch x; }`],
+    ['cd as an if condition', `if cd ${READ_ONLY}; then touch x; fi`],
+    ['builtin cd', `builtin cd ${READ_ONLY} && touch x`],
+    ['command cd', `command cd ${READ_ONLY} && touch x`],
+    ['git fetch in a loop body', `cd ${READ_ONLY} && echo 1 | while read n; do git fetch -q origin; done`],
+    ['git archive -o into it', `cd ${READ_ONLY} && git archive -o out.tar HEAD`],
+    ['a subshell cd elsewhere does not move the outer shell', `cd ${READ_ONLY} && (cd /tmp && ls) && touch x`],
   ])('refuses %s', (_label, command) => {
     expect(bash(command).code).toBe(2);
   });
@@ -270,6 +278,8 @@ describe('guest runs: writing from inside a read-only root', () => {
   it.each([
     ['reading after cd with stderr silenced', `cd ${READ_ONLY} 2>/dev/null && grep -rn "foo" . | head`],
     ['writing in the workspace after cd -P', `cd -P ${WORKSPACE} && touch x`],
+    ['writing after a subshell cd into it ended', `( cd ${READ_ONLY} && ls ) && touch x`],
+    ['git archive to stdout in a subshell', `cd /tmp && (cd ${READ_ONLY} && git archive HEAD docs) | tar -x -C /tmp/x`],
   ])('allows %s', (_label, command) => {
     expect(bash(command).code).toBe(0);
   });
@@ -294,8 +304,28 @@ describe('guest runs: searches whose output is run', () => {
     ['run through $()', `$(grep -oh 'kubectl delete pod' ${WORKSPACE}/f)`],
     ['$() inside double quotes around single quotes', `grep "a'$(kubectl delete pod x)'b" ${WORKSPACE}/f`],
     ['fed to xargs', `grep -oh 'kubectl delete pod x' ${WORKSPACE}/f | xargs -I{} sh -c {}`],
+    ['piped into sudo -u … sh', `grep -oh 'kubectl delete pod x' ${WORKSPACE}/f | sudo -u u sh`],
+    ['eval of a substitution', `eval "$(grep -oh 'kubectl delete pod x' ${WORKSPACE}/f)"`],
+    ['sourced through <()', `source <(grep -oh 'kubectl delete pod x' ${WORKSPACE}/f)`],
+    ['a variable holding the output run as the command', `c=$(grep -oh 'kubectl delete pod x' ${WORKSPACE}/f); $c`],
+    ['bash -c of a substitution', `bash -c "$(grep -oh 'kubectl delete pod x' ${WORKSPACE}/f)"`],
   ])('refuses one %s', (_label, command) => {
     expect(run(command).code).toBe(2);
+  });
+
+  // Review 2026-11-20 (R1): ordinary searches that only mention xargs, $(),
+  // source or a /source/ path must still search for the text.
+  it.each([
+    ['find | xargs grep', `find ${WORKSPACE} -name '*.ts' | xargs grep -n "kubectl delete"`],
+    ['xargs -0 grep -l', `find ${WORKSPACE} -print0 | xargs -0 grep -l "kubectl delete"`],
+    ['cd $(git rev-parse) then grep', `cd $(git rev-parse --show-toplevel) && grep -rn "kubectl delete" .`],
+    ['a path named source', `grep -rn "kubectl delete" ${WORKSPACE}/docs/source`],
+    ['an option named --source', `rg -n "kubectl delete" --sort path ${WORKSPACE} --source x`],
+    ['source venv then grep', `source venv/bin/activate && grep -rn "kubectl delete" ${WORKSPACE}`],
+    ['a pattern with | sh inside', `grep -rnE "kubectl delete|foo | sh" ${WORKSPACE}`],
+    ['grep piped into wc', `grep -rn "kubectl delete" ${WORKSPACE} | wc -l`],
+  ])('allows %s', (_label, command) => {
+    expect(run(command).code).toBe(0);
   });
 });
 

@@ -38,13 +38,10 @@ import {
   type ExternalMaterial,
 } from './external';
 import { type DiaryInput } from './diary';
-import { } from './global-digest';
-import { } from '../knowledge/store';
 import { holdBack, quotaGate, runAutoCheck, type AutoGateHost } from './auto-gate';
 import { deepSleep, type DeepSleepHost } from './deep-sleep';
 import { baseRepo } from './util';
 import { ACCOUNTS_FULL_REASON, nextDrainRound } from './drain';
-import { } from './format';
 import { formatAfterRun, runAfterAutoCommands } from './after-run';
 import { acquireDreamLocks, type HeldDreamLocks } from './lock';
 import { buildDreamScopePrompt, buildExternalLearningPrompt } from './prompt';
