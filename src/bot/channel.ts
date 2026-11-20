@@ -2762,12 +2762,409 @@ async function submitBatchRun(
   };
 }
 
+/**
+ * Stream a submitted run's events and deliver its reply in the configured
+ * reply mode (CoT bubble, progress card, streamed markdown or plain text),
+ * recording how the run ended on `run`.
+ */
+async function deliverRunReply(
+  deps: RunBatchDeps,
+  input: { chatId: string; lastMsg: NormalizedMessage; run: BatchRunState } & Pick<
+    NonNullable<Awaited<ReturnType<typeof submitBatchRun>>>,
+    | 'execution'
+    | 'handle'
+    | 'eventStream'
+    | 'idleTimeoutMs'
+    | 'recordSession'
+    | 'sendOpts'
+    | 'replyMode'
+    | 'cotMessages'
+    | 'cotEnabled'
+    | 'separateFinalReply'
+    | 'supplementTarget'
+    | 'locale'
+    | 'filterForPrefs'
+    | 'cardRenderOptions'
+  >,
+): Promise<void> {
+  const { channel, cotClient, scope } = deps;
+  const {
+    chatId,
+    lastMsg,
+    run,
+    execution,
+    handle,
+    eventStream,
+    idleTimeoutMs,
+    recordSession,
+    sendOpts,
+    replyMode,
+    cotMessages,
+    cotEnabled,
+    separateFinalReply,
+    supplementTarget,
+    locale,
+    filterForPrefs,
+    cardRenderOptions,
+  } = input;
+  if (cotEnabled) {
+    const cotPublisher = new CotPublisher({
+      client: cotClient,
+      chatId,
+      // The CoT bubble follows this origin message's thread. In a topic the
+      // triggering message is itself in-topic, so the bubble lands in the
+      // topic; message_cot has no thread_id receive type, so origin is the
+      // only lever we have (see CotClient.create).
+      originMessageId: lastMsg.messageId,
+      runId: execution.runId,
+      scope,
+      inputPreview: lastMsg.content,
+    });
+    await cotPublisher.start();
+    if (!cotPublisher.disabled) {
+      const cotDone = consumeCotEvents(execution.subscribe(), cotPublisher, {
+        detail: cotMessages,
+      });
+      const finalState = await processAgentStream(
+        handle,
+        eventStream,
+        scope,
+        idleTimeoutMs,
+        recordSession,
+        async () => {},
+      );
+      await cotDone;
+      run.runTerminal = finalState.terminal;
+      run.runLimit = finalState.limit;
+      run.runError = finalState.errorMsg;
+      if (cotPublisher.degradedReason) {
+        await sendCotDegradedNotice({
+          channel,
+          chatId,
+          scope,
+          sendOpts,
+          reason: cotPublisher.degradedReason,
+        });
+      }
+      run.answerIsNewMessage = true;
+      await sendFinalReply({
+        channel,
+        chatId,
+        scope,
+        state: finalAnswerOnlyState(stripControlMarkers((run.lastRawState = finalState))),
+        replyMode,
+        sendOpts,
+        cardRenderOptions,
+      });
+      return;
+    }
+    log.warn('cot', 'fallback-existing-reply', { reason: 'create-disabled' });
+  }
+
+  if (replyMode === 'card') {
+    let latestState: RunState = initialState;
+    let producerStarted = false;
+    let cardCtrl:
+      | { update(next: object | ((current: object) => object)): Promise<void>; readonly messageId?: string }
+      | undefined;
+    let cardMessageId: string | undefined;
+    // Whether the last card rendered had to cut the answer to fit.
+    let cardTrimmed = false;
+    let lastLiveCard: object | undefined;
+    const cardHealth = new CardPatchHealth((code) => {
+      void channel
+        .send(chatId, { markdown: runStrings(locale).cardBroken(String(code ?? '?')) }, sendOpts)
+        .catch((err) => log.fail('stream', err, { step: 'card-broken-notice' }));
+    });
+    // The card as the user should see it now: live clock while running,
+    // shrunk to fit Feishu's size limit (see fitCardToBudget).
+    const renderLiveCard = (state: RunState): object => {
+      const running = state.terminal === 'running';
+      const options: RunCardRenderOptions = running
+        ? { ...cardRenderOptions, activity: runActivity(handle, state, locale) }
+        : cardRenderOptions;
+      const fitted = fitCardToBudget(
+        filterForPrefs(state),
+        (s) => renderCard(s, options),
+        undefined,
+        locale,
+      );
+      cardTrimmed = fitted.trimmed;
+      lastLiveCard = fitted.card;
+      return fitted.card;
+    };
+    const cardProducer = async (ctrl: NonNullable<typeof cardCtrl> & { readonly messageId: string }): Promise<void> => {
+      producerStarted = true;
+      if (progress.abandoned()) return;
+      cardCtrl = ctrl;
+      cardMessageId = ctrl.messageId;
+      instrumentCardPatches(ctrl, cardHealth);
+      supplementTarget.replyIds.add(ctrl.messageId);
+      await ctrl.update(renderLiveCard(latestState));
+      await renderDone;
+    };
+    const progress = createLazyProgressStream(scope, replyMode, () => {
+      const initial = renderCard(initialState, cardRenderOptions);
+      // A topic opened for this message: its first post is already this card, waiting to be taken over.
+      const opener = takeTopicOpener(scope);
+      if (opener) {
+        log.info('topic-prefix', 'opener-adopted', { scope, msgId: opener.messageId });
+        // Left empty, it goes back to the notice rather than being recalled: it opened the topic.
+        return adoptCardStream(channel, opener.messageId, initial, cardProducer).then((r) => ({
+          ...r,
+          emptyCard: topicOpenedNoticeCard(opener),
+        }));
+      }
+      return channel.stream(chatId, { card: { initial, producer: cardProducer } }, sendOpts);
+    });
+    const renderDone = processAgentStream(
+      handle,
+      eventStream,
+      scope,
+      idleTimeoutMs,
+      recordSession,
+      async (state) => {
+        latestState = state;
+        if (shouldOpenProgressStream(filterForPrefs(state))) progress.ensureOpen();
+        if (cardCtrl) {
+          await cardCtrl.update(renderLiveCard(state));
+        }
+      },
+    );
+    if (opensProgressEagerly(separateFinalReply)) progress.ensureOpen();
+    // Keep the clock ticking while the agent is quiet. Only touches a card
+    // that is still running, so it can never overwrite the final one.
+    // Set once the stream's failed final update was rescued: that already
+    // re-sent the answer, so the card-broken delivery below must not repeat it.
+    let rescued = false;
+    // The card's last update was rejected for good: point the card at the
+    // answer and post the answer as messages. Runs at most once — at the end
+    // of the run, or later when the final update outlived the grace window.
+    let cardBrokenHandled = false;
+    const deliverIfCardBroken = async (): Promise<boolean> => {
+      if (cardBrokenHandled || rescued || !cardHealth.lastFailed) return false;
+      cardBrokenHandled = true;
+      await deliverAnswerOutsideCard({
+        channel,
+        chatId,
+        scope,
+        sendOpts,
+        reason: 'card-broken',
+        state: filterForPrefs(latestState),
+        ...(cardMessageId
+          ? {
+              messageId: cardMessageId,
+              pointerCard: renderCard(
+                pointerState(latestState, cardHealth.lastErrorCode, locale),
+                cardRenderOptions,
+              ),
+            }
+          : {}),
+      });
+      return true;
+    };
+    const heartbeat = setInterval(() => {
+      if (cardCtrl && latestState.terminal === 'running') {
+        fireAndForget(cardCtrl.update(renderLiveCard(latestState)), 'card', { step: 'heartbeat', scope });
+      }
+    }, CARD_HEARTBEAT_MS);
+    heartbeat.unref?.();
+    try {
+      await awaitRenderAwareStream({
+        mode: replyMode,
+        progress,
+        renderDone,
+        producerStarted: () => producerStarted,
+        fallback: async (state) => {
+          if (separateFinalReply) return;
+          if (renderText(filterForPrefs(state)).trim() === '') return;
+          const fitted = fitCardToBudget(
+            filterForPrefs(state),
+            (s) => renderCard(s, cardRenderOptions),
+            undefined,
+            locale,
+          );
+          await channel.send(chatId, { card: fitted.card }, sendOpts);
+          if (fitted.trimmed) {
+            await deliverAnswerOutsideCard({
+              channel,
+              chatId,
+              scope,
+              sendOpts,
+              reason: 'too-long',
+              state: filterForPrefs(state),
+            });
+          }
+        },
+        rescue: separateFinalReply
+          ? undefined
+          : (state) => {
+              rescued = true;
+              return rescueCardReply({
+                channel,
+                chatId,
+                scope,
+                sendOpts,
+                cardRenderOptions,
+                streamedMessageId: cardCtrl?.messageId,
+                state: filterForPrefs(state),
+              });
+            },
+        lateStreamEnd: separateFinalReply ? undefined : () => deliverIfCardBroken().then(() => {}),
+      });
+    } catch (err) {
+      if (!separateFinalReply) throw err;
+      log.fail('stream', err, { mode: replyMode, step: 'progress-stream' });
+    } finally {
+      clearInterval(heartbeat);
+    }
+    await recallIfEmptyStreamedReply(channel, progress, filterForPrefs(latestState), scope);
+    if (separateFinalReply) {
+      run.answerIsNewMessage = true;
+      await sendFinalReply({
+        channel,
+        chatId,
+        scope,
+        state: finalReplyState(progress, filterForPrefs(latestState)),
+        replyMode,
+        sendOpts,
+        cardRenderOptions,
+      });
+    } else if (progress.opened() && !progress.abandoned()) {
+      // The card is the reply. If it doesn't hold the whole answer — its
+      // last update was rejected, or the answer outgrew it — post the
+      // answer as ordinary messages so it is never lost.
+      if (!(await deliverIfCardBroken()) && cardTrimmed) {
+        await deliverAnswerOutsideCard({
+          channel,
+          chatId,
+          scope,
+          sendOpts,
+          reason: 'too-long',
+          state: filterForPrefs(latestState),
+        });
+      }
+    }
+    run.runTerminal = latestState.terminal;
+    run.runLimit = latestState.limit;
+    run.runError = latestState.errorMsg;
+    if (run.runTerminal === 'paused' && cardMessageId && lastLiveCard) {
+      run.pausedCard = { messageId: cardMessageId, card: lastLiveCard };
+    }
+  } else if (replyMode === 'markdown') {
+    let latestState: RunState = initialState;
+    let producerStarted = false;
+    let markdownCtrl: { setContent(markdown: string): Promise<void> } | undefined;
+    const progress = createLazyProgressStream(scope, replyMode, () =>
+      channel.stream(
+        chatId,
+        {
+          markdown: async (ctrl) => {
+            producerStarted = true;
+            if (progress.abandoned()) return;
+            markdownCtrl = ctrl;
+            supplementTarget.replyIds.add(ctrl.messageId);
+            await ctrl.setContent(renderText(filterForPrefs(latestState), locale));
+            await renderDone;
+          },
+        },
+        sendOpts,
+      ),
+    );
+    const renderDone = processAgentStream(
+      handle,
+      eventStream,
+      scope,
+      idleTimeoutMs,
+      recordSession,
+      async (state) => {
+        latestState = state;
+        if (shouldOpenProgressStream(filterForPrefs(state))) progress.ensureOpen();
+        if (markdownCtrl) {
+          await markdownCtrl.setContent(renderText(filterForPrefs(state), locale));
+        }
+      },
+    );
+    if (opensProgressEagerly(separateFinalReply)) progress.ensureOpen();
+    try {
+      await awaitRenderAwareStream({
+        mode: replyMode,
+        progress,
+        renderDone,
+        producerStarted: () => producerStarted,
+        fallback: async (state) => {
+          if (separateFinalReply) return;
+          const body = renderText(filterForPrefs(state), locale);
+          if (body.trim()) {
+            await channel.send(chatId, { markdown: body }, sendOpts);
+          }
+        },
+        rescue: separateFinalReply
+          ? undefined
+          : async (state) => {
+              const body = renderText(finalAnswerOnlyState(filterForPrefs(state)));
+              if (!body.trim()) return;
+              const result = await channel.send(chatId, { markdown: body }, sendOpts);
+              requireMessageReceipt(result, 'markdown');
+              log.info('outbound', 'rescue-sent', { scope, via: 'markdown', messageId: result.messageId });
+            },
+      });
+    } catch (err) {
+      if (!separateFinalReply) throw err;
+      log.fail('stream', err, { mode: replyMode, step: 'progress-stream' });
+    }
+    await recallIfEmptyStreamedReply(channel, progress, filterForPrefs(latestState), scope);
+    if (separateFinalReply) {
+      run.answerIsNewMessage = true;
+      await sendFinalReply({
+        channel,
+        chatId,
+        scope,
+        state: finalReplyState(progress, filterForPrefs(latestState)),
+        replyMode,
+        sendOpts,
+        cardRenderOptions,
+      });
+    }
+    run.runTerminal = latestState.terminal;
+    run.runLimit = latestState.limit;
+    run.runError = latestState.errorMsg;
+  } else {
+    // text mode: drain the agent stream without sending anything during
+    // the run, then post the final rendered text once as a plain markdown
+    // (msg_type=post) message — no card, no streaming, no typewriter.
+    const finalState = await processAgentStream(
+      handle,
+      eventStream,
+      scope,
+      idleTimeoutMs,
+      recordSession,
+      async () => {},
+    );
+    run.answerIsNewMessage = true;
+    await sendFinalReply({
+      channel,
+      chatId,
+      scope,
+      state:
+        separateFinalReply
+          ? finalAnswerOnlyState(filterForPrefs(finalState))
+          : filterForPrefs(finalState),
+      replyMode,
+      sendOpts,
+      cardRenderOptions,
+    });
+    run.runTerminal = finalState.terminal;
+    run.runLimit = finalState.limit;
+    run.runError = finalState.errorMsg;
+  }
+}
+
 async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   const {
     channel,
     batch,
     controls,
-    cotClient,
     activePolicyFingerprints,
     pendingRotations,
     backgroundOrigins,
@@ -2872,357 +3269,25 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   if (cotEnabled || replyMode !== 'card') await releaseTopicOpener(channel, scope);
 
   try {
-    if (cotEnabled) {
-      const cotPublisher = new CotPublisher({
-        client: cotClient,
-        chatId,
-        // The CoT bubble follows this origin message's thread. In a topic the
-        // triggering message is itself in-topic, so the bubble lands in the
-        // topic; message_cot has no thread_id receive type, so origin is the
-        // only lever we have (see CotClient.create).
-        originMessageId: lastMsg.messageId,
-        runId: execution.runId,
-        scope,
-        inputPreview: lastMsg.content,
-      });
-      await cotPublisher.start();
-      if (!cotPublisher.disabled) {
-        const cotDone = consumeCotEvents(execution.subscribe(), cotPublisher, {
-          detail: cotMessages,
-        });
-        const finalState = await processAgentStream(
-          handle,
-          eventStream,
-          scope,
-          idleTimeoutMs,
-          recordSession,
-          async () => {},
-        );
-        await cotDone;
-        run.runTerminal = finalState.terminal;
-        run.runLimit = finalState.limit;
-        run.runError = finalState.errorMsg;
-        if (cotPublisher.degradedReason) {
-          await sendCotDegradedNotice({
-            channel,
-            chatId,
-            scope,
-            sendOpts,
-            reason: cotPublisher.degradedReason,
-          });
-        }
-        run.answerIsNewMessage = true;
-        await sendFinalReply({
-          channel,
-          chatId,
-          scope,
-          state: finalAnswerOnlyState(stripControlMarkers((run.lastRawState = finalState))),
-          replyMode,
-          sendOpts,
-          cardRenderOptions,
-        });
-        return;
-      }
-      log.warn('cot', 'fallback-existing-reply', { reason: 'create-disabled' });
-    }
-
-    if (replyMode === 'card') {
-      let latestState: RunState = initialState;
-      let producerStarted = false;
-      let cardCtrl:
-        | { update(next: object | ((current: object) => object)): Promise<void>; readonly messageId?: string }
-        | undefined;
-      let cardMessageId: string | undefined;
-      // Whether the last card rendered had to cut the answer to fit.
-      let cardTrimmed = false;
-      let lastLiveCard: object | undefined;
-      const cardHealth = new CardPatchHealth((code) => {
-        void channel
-          .send(chatId, { markdown: runStrings(locale).cardBroken(String(code ?? '?')) }, sendOpts)
-          .catch((err) => log.fail('stream', err, { step: 'card-broken-notice' }));
-      });
-      // The card as the user should see it now: live clock while running,
-      // shrunk to fit Feishu's size limit (see fitCardToBudget).
-      const renderLiveCard = (state: RunState): object => {
-        const running = state.terminal === 'running';
-        const options: RunCardRenderOptions = running
-          ? { ...cardRenderOptions, activity: runActivity(handle, state, locale) }
-          : cardRenderOptions;
-        const fitted = fitCardToBudget(
-          filterForPrefs(state),
-          (s) => renderCard(s, options),
-          undefined,
-          locale,
-        );
-        cardTrimmed = fitted.trimmed;
-        lastLiveCard = fitted.card;
-        return fitted.card;
-      };
-      const cardProducer = async (ctrl: NonNullable<typeof cardCtrl> & { readonly messageId: string }): Promise<void> => {
-        producerStarted = true;
-        if (progress.abandoned()) return;
-        cardCtrl = ctrl;
-        cardMessageId = ctrl.messageId;
-        instrumentCardPatches(ctrl, cardHealth);
-        supplementTarget.replyIds.add(ctrl.messageId);
-        await ctrl.update(renderLiveCard(latestState));
-        await renderDone;
-      };
-      const progress = createLazyProgressStream(scope, replyMode, () => {
-        const initial = renderCard(initialState, cardRenderOptions);
-        // A topic opened for this message: its first post is already this card, waiting to be taken over.
-        const opener = takeTopicOpener(scope);
-        if (opener) {
-          log.info('topic-prefix', 'opener-adopted', { scope, msgId: opener.messageId });
-          // Left empty, it goes back to the notice rather than being recalled: it opened the topic.
-          return adoptCardStream(channel, opener.messageId, initial, cardProducer).then((r) => ({
-            ...r,
-            emptyCard: topicOpenedNoticeCard(opener),
-          }));
-        }
-        return channel.stream(chatId, { card: { initial, producer: cardProducer } }, sendOpts);
-      });
-      const renderDone = processAgentStream(
-        handle,
-        eventStream,
-        scope,
-        idleTimeoutMs,
-        recordSession,
-        async (state) => {
-          latestState = state;
-          if (shouldOpenProgressStream(filterForPrefs(state))) progress.ensureOpen();
-          if (cardCtrl) {
-            await cardCtrl.update(renderLiveCard(state));
-          }
-        },
-      );
-      if (opensProgressEagerly(separateFinalReply)) progress.ensureOpen();
-      // Keep the clock ticking while the agent is quiet. Only touches a card
-      // that is still running, so it can never overwrite the final one.
-      // Set once the stream's failed final update was rescued: that already
-      // re-sent the answer, so the card-broken delivery below must not repeat it.
-      let rescued = false;
-      // The card's last update was rejected for good: point the card at the
-      // answer and post the answer as messages. Runs at most once — at the end
-      // of the run, or later when the final update outlived the grace window.
-      let cardBrokenHandled = false;
-      const deliverIfCardBroken = async (): Promise<boolean> => {
-        if (cardBrokenHandled || rescued || !cardHealth.lastFailed) return false;
-        cardBrokenHandled = true;
-        await deliverAnswerOutsideCard({
-          channel,
-          chatId,
-          scope,
-          sendOpts,
-          reason: 'card-broken',
-          state: filterForPrefs(latestState),
-          ...(cardMessageId
-            ? {
-                messageId: cardMessageId,
-                pointerCard: renderCard(
-                  pointerState(latestState, cardHealth.lastErrorCode, locale),
-                  cardRenderOptions,
-                ),
-              }
-            : {}),
-        });
-        return true;
-      };
-      const heartbeat = setInterval(() => {
-        if (cardCtrl && latestState.terminal === 'running') {
-          fireAndForget(cardCtrl.update(renderLiveCard(latestState)), 'card', { step: 'heartbeat', scope });
-        }
-      }, CARD_HEARTBEAT_MS);
-      heartbeat.unref?.();
-      try {
-        await awaitRenderAwareStream({
-          mode: replyMode,
-          progress,
-          renderDone,
-          producerStarted: () => producerStarted,
-          fallback: async (state) => {
-            if (separateFinalReply) return;
-            if (renderText(filterForPrefs(state)).trim() === '') return;
-            const fitted = fitCardToBudget(
-              filterForPrefs(state),
-              (s) => renderCard(s, cardRenderOptions),
-              undefined,
-              locale,
-            );
-            await channel.send(chatId, { card: fitted.card }, sendOpts);
-            if (fitted.trimmed) {
-              await deliverAnswerOutsideCard({
-                channel,
-                chatId,
-                scope,
-                sendOpts,
-                reason: 'too-long',
-                state: filterForPrefs(state),
-              });
-            }
-          },
-          rescue: separateFinalReply
-            ? undefined
-            : (state) => {
-                rescued = true;
-                return rescueCardReply({
-                  channel,
-                  chatId,
-                  scope,
-                  sendOpts,
-                  cardRenderOptions,
-                  streamedMessageId: cardCtrl?.messageId,
-                  state: filterForPrefs(state),
-                });
-              },
-          lateStreamEnd: separateFinalReply ? undefined : () => deliverIfCardBroken().then(() => {}),
-        });
-      } catch (err) {
-        if (!separateFinalReply) throw err;
-        log.fail('stream', err, { mode: replyMode, step: 'progress-stream' });
-      } finally {
-        clearInterval(heartbeat);
-      }
-      await recallIfEmptyStreamedReply(channel, progress, filterForPrefs(latestState), scope);
-      if (separateFinalReply) {
-        run.answerIsNewMessage = true;
-        await sendFinalReply({
-          channel,
-          chatId,
-          scope,
-          state: finalReplyState(progress, filterForPrefs(latestState)),
-          replyMode,
-          sendOpts,
-          cardRenderOptions,
-        });
-      } else if (progress.opened() && !progress.abandoned()) {
-        // The card is the reply. If it doesn't hold the whole answer — its
-        // last update was rejected, or the answer outgrew it — post the
-        // answer as ordinary messages so it is never lost.
-        if (!(await deliverIfCardBroken()) && cardTrimmed) {
-          await deliverAnswerOutsideCard({
-            channel,
-            chatId,
-            scope,
-            sendOpts,
-            reason: 'too-long',
-            state: filterForPrefs(latestState),
-          });
-        }
-      }
-      run.runTerminal = latestState.terminal;
-      run.runLimit = latestState.limit;
-      run.runError = latestState.errorMsg;
-      if (run.runTerminal === 'paused' && cardMessageId && lastLiveCard) {
-        run.pausedCard = { messageId: cardMessageId, card: lastLiveCard };
-      }
-    } else if (replyMode === 'markdown') {
-      let latestState: RunState = initialState;
-      let producerStarted = false;
-      let markdownCtrl: { setContent(markdown: string): Promise<void> } | undefined;
-      const progress = createLazyProgressStream(scope, replyMode, () =>
-        channel.stream(
-          chatId,
-          {
-            markdown: async (ctrl) => {
-              producerStarted = true;
-              if (progress.abandoned()) return;
-              markdownCtrl = ctrl;
-              supplementTarget.replyIds.add(ctrl.messageId);
-              await ctrl.setContent(renderText(filterForPrefs(latestState), locale));
-              await renderDone;
-            },
-          },
-          sendOpts,
-        ),
-      );
-      const renderDone = processAgentStream(
-        handle,
-        eventStream,
-        scope,
-        idleTimeoutMs,
-        recordSession,
-        async (state) => {
-          latestState = state;
-          if (shouldOpenProgressStream(filterForPrefs(state))) progress.ensureOpen();
-          if (markdownCtrl) {
-            await markdownCtrl.setContent(renderText(filterForPrefs(state), locale));
-          }
-        },
-      );
-      if (opensProgressEagerly(separateFinalReply)) progress.ensureOpen();
-      try {
-        await awaitRenderAwareStream({
-          mode: replyMode,
-          progress,
-          renderDone,
-          producerStarted: () => producerStarted,
-          fallback: async (state) => {
-            if (separateFinalReply) return;
-            const body = renderText(filterForPrefs(state), locale);
-            if (body.trim()) {
-              await channel.send(chatId, { markdown: body }, sendOpts);
-            }
-          },
-          rescue: separateFinalReply
-            ? undefined
-            : async (state) => {
-                const body = renderText(finalAnswerOnlyState(filterForPrefs(state)));
-                if (!body.trim()) return;
-                const result = await channel.send(chatId, { markdown: body }, sendOpts);
-                requireMessageReceipt(result, 'markdown');
-                log.info('outbound', 'rescue-sent', { scope, via: 'markdown', messageId: result.messageId });
-              },
-        });
-      } catch (err) {
-        if (!separateFinalReply) throw err;
-        log.fail('stream', err, { mode: replyMode, step: 'progress-stream' });
-      }
-      await recallIfEmptyStreamedReply(channel, progress, filterForPrefs(latestState), scope);
-      if (separateFinalReply) {
-        run.answerIsNewMessage = true;
-        await sendFinalReply({
-          channel,
-          chatId,
-          scope,
-          state: finalReplyState(progress, filterForPrefs(latestState)),
-          replyMode,
-          sendOpts,
-          cardRenderOptions,
-        });
-      }
-      run.runTerminal = latestState.terminal;
-      run.runLimit = latestState.limit;
-      run.runError = latestState.errorMsg;
-    } else {
-      // text mode: drain the agent stream without sending anything during
-      // the run, then post the final rendered text once as a plain markdown
-      // (msg_type=post) message — no card, no streaming, no typewriter.
-      const finalState = await processAgentStream(
-        handle,
-        eventStream,
-        scope,
-        idleTimeoutMs,
-        recordSession,
-        async () => {},
-      );
-      run.answerIsNewMessage = true;
-      await sendFinalReply({
-        channel,
-        chatId,
-        scope,
-        state:
-          separateFinalReply
-            ? finalAnswerOnlyState(filterForPrefs(finalState))
-            : filterForPrefs(finalState),
-        replyMode,
-        sendOpts,
-        cardRenderOptions,
-      });
-      run.runTerminal = finalState.terminal;
-      run.runLimit = finalState.limit;
-      run.runError = finalState.errorMsg;
-    }
+    await deliverRunReply(deps, {
+      chatId,
+      lastMsg,
+      run,
+      execution,
+      handle,
+      eventStream,
+      idleTimeoutMs,
+      recordSession,
+      sendOpts,
+      replyMode,
+      cotMessages,
+      cotEnabled,
+      separateFinalReply,
+      supplementTarget,
+      locale,
+      filterForPrefs,
+      cardRenderOptions,
+    });
   } catch (err) {
     log.fail('stream', err);
   } finally {
