@@ -218,8 +218,6 @@ const handlers: Record<string, Handler> = {
   '/usage': handleUsage,
   '/audit': handleAudit,
   '/practice': handleDream,
-  // Upstream name, kept so old habits and upstream docs still work.
-  '/dream': handleDream,
   // Card buttons of approval prompts (not typed by people; see ApprovalBroker).
   '/approval': handleApproval,
 };
@@ -261,7 +259,6 @@ const ADMIN_COMMANDS = new Set([
   '/audit',
   // Reads every chat's conversations and opens PRs against shared repositories.
   '/practice',
-  '/dream',
 ]);
 
 function isAdminCommand(cmd: string): boolean {
