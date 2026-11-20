@@ -1,4 +1,4 @@
-import type { LarkChannel } from '@larksuite/channel';
+import type { LarkChannel, MentionInfo } from '@larksuite/channel';
 import { agentAccountName } from '../agent/account';
 import { agentCapability } from '../agent/capability';
 import { agentDescriptor } from '../agent/registry';
@@ -8,6 +8,8 @@ import { recordRunSessionEvent, startRunFlow } from '../bot/run-flow';
 import { renderCard, type RunCardRenderOptions } from '../card/run-renderer';
 import type { RunState } from '../card/run-state';
 import { renderText } from '../card/text-renderer';
+import { answerTextOf, stripControlMarkers } from '../card/run-state';
+import { OWNER_BRIEF_INSTRUCTION, planOwnerNotice } from '../card/owner-notify';
 import { promptSection } from '../agent/prompt';
 import { buildKnowledgeContext, nativeSkillOption } from '../knowledge/inject';
 import { isCreator } from '../policy/access';
@@ -19,6 +21,7 @@ import {
   getMessageReplyMode,
   getRunIdleTimeoutMs,
   getShowToolCalls,
+  isOwnerNotifyChat,
 } from '../config/schema';
 import { log } from '../core/logger';
 import { canUseDm, canUseGroup } from '../policy/access';
@@ -165,13 +168,30 @@ export async function runScheduledJob(
     if (cap) clearTimeout(cap);
   }
 
+  const shown = stripControlMarkers(state);
   const visible = getShowToolCalls(deps.controls.cfg)
-    ? state
-    : { ...state, blocks: state.blocks.filter((b) => b.kind !== 'tool'), reasoning: { content: '', active: false } };
+    ? shown
+    : { ...shown, blocks: shown.blocks.filter((b) => b.kind !== 'tool'), reasoning: { content: '', active: false } };
 
   await deliver(deps, job, visible).catch((err: unknown) => {
     log.fail('scheduler', err, { jobId: job.id, step: 'deliver' });
   });
+
+  // 结果提醒主人: in the chats the owner reads results in, @ them with a line.
+  const ownerId = ownerNotifyTarget(deps, job);
+  if (ownerId) {
+    const notice = planOwnerNotice({
+      ownerId,
+      terminal: overran ? 'error' : state.terminal,
+      answerText: answerTextOf(state),
+      ...(overran ? { error: `运行超过 ${maxMs! / 60_000} 分钟上限，已停止` } : state.errorMsg ? { error: state.errorMsg } : {}),
+    });
+    if (notice) {
+      await sendToJobChat(deps, job, { text: notice.text }, notice.mentions).catch((err: unknown) => {
+        log.warn('scheduler', 'owner-notice-failed', { jobId: job.id, err: String(err) });
+      });
+    }
+  }
 
   const ok = state.terminal === 'done';
   // Stopped by the cap, not by a person or a shutdown: its own terminal, so
@@ -232,14 +252,22 @@ export async function notifyJobChat(
   });
 }
 
+/** The owner to @ after this job's runs, when its chat is an owner-notify chat. */
+function ownerNotifyTarget(deps: JobRunnerDeps, job: ScheduledJob): string | undefined {
+  const ownerId = deps.controls.botOwnerId;
+  return ownerId && isOwnerNotifyChat(deps.controls.cfg, job.chatId) ? ownerId : undefined;
+}
+
 async function sendToJobChat(
   deps: JobRunnerDeps,
   job: ScheduledJob,
-  payload: { markdown: string } | { card: object },
+  payload: { markdown: string } | { card: object } | { text: string },
+  mentions?: MentionInfo[],
 ): Promise<void> {
+  const withMentions = mentions && mentions.length > 0 ? { mentions } : {};
   const threaded =
     job.threadId && job.anchorMessageId
-      ? { replyTo: job.anchorMessageId, replyInThread: true }
+      ? { replyTo: job.anchorMessageId, replyInThread: true, ...withMentions }
       : undefined;
   if (threaded) {
     try {
@@ -251,7 +279,7 @@ async function sendToJobChat(
       log.warn('scheduler', 'thread-send-failed', { jobId: job.id, err: String(err) });
     }
   }
-  await deps.channel.send(job.chatId, payload);
+  await deps.channel.send(job.chatId, payload, withMentions);
 }
 
 async function cardOptions(deps: JobRunnerDeps, chatId: string): Promise<RunCardRenderOptions> {
@@ -319,6 +347,7 @@ async function buildJobPrompt(
     `[定时任务 ${job.id}]`,
     `本次运行由 bridge 调度器在 ${formatDateTime(firedAt)} 触发（${scheduleLabel(job)}），没有人在旁边等着回答追问。`,
     '请直接完成任务并给出可以直接发到群里的结论；需要澄清的地方按最合理的假设推进，并在结论里说明假设。',
+    ...(ownerNotifyTarget(deps, job) ? [OWNER_BRIEF_INSTRUCTION] : []),
     '',
     '任务内容：',
     job.prompt,

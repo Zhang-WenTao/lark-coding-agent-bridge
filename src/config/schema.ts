@@ -232,6 +232,13 @@ export interface AppPreferences {
    */
   longRunNoticeMinutes?: number;
   /**
+   * 结果提醒主人: chat ids (oc_…) where every finished run ends with a short
+   * reply that @-mentions the bot owner with a one-line brief of the result —
+   * for topic groups the owner reads results in (scheduled jobs, dev tasks).
+   * Replaces the long-run notice there. Config-file only.
+   */
+  ownerNotifyChats?: string[];
+  /**
    * 过载保护: in these group chats, a batch made only of other bots' messages
    * is not answered while the agent account's quota is tight — the bot posts
    * an overload card instead and starts no run. Humans are always answered.
@@ -826,6 +833,12 @@ export function getLongRunNoticeMs(cfg: AppConfig): number | undefined {
   if (raw === undefined) return DEFAULT_LONG_RUN_NOTICE_MINUTES * 60_000;
   if (typeof raw !== 'number' || !Number.isFinite(raw) || raw <= 0) return undefined;
   return Math.min(Math.max(Math.floor(raw), 1), 24 * 60) * 60_000;
+}
+
+/** Whether runs in `chatId` end with an @-the-owner brief. See `ownerNotifyChats`. */
+export function isOwnerNotifyChat(cfg: AppConfig, chatId: string): boolean {
+  const raw = cfg.preferences?.ownerNotifyChats;
+  return Array.isArray(raw) && raw.some((id) => typeof id === 'string' && id === chatId);
 }
 
 /**

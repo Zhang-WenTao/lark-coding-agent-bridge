@@ -56,6 +56,7 @@ import {
   getMaxConcurrentRuns,
   getMessageReplyMode,
   getLongRunNoticeMs,
+  isOwnerNotifyChat,
   getRunIdleTimeoutMs,
   getShowToolCalls,
   getSmartSession,
@@ -219,6 +220,7 @@ import {
   runForMessage,
 } from './edit';
 import { mediaPlaceholders } from './media-placeholders';
+import { OWNER_BRIEF_INSTRUCTION, planOwnerNotice, stripBriefMarker } from '../card/owner-notify';
 import { planLongRunNotice, sendLongRunNotice } from './long-run-notice';
 import {
   BackgroundOrigins,
@@ -2223,6 +2225,7 @@ async function prepareBatchPrompt(
         ]
       : []),
     ...(smartSession ? [SMART_SESSION_INSTRUCTION] : []),
+    ...(controls.botOwnerId && isOwnerNotifyChat(controls.cfg, chatId) ? [OWNER_BRIEF_INSTRUCTION] : []),
     ...(editedIds.length > 0 ? [editInstruction(editedIds)] : []),
     ...(waitingOrigins.length > 0
       ? [backgroundTasksInstruction(waitingOrigins, executor.backgroundTasks(scope))]
@@ -2701,7 +2704,8 @@ async function submitBatchRun(
       origins,
       outcome,
       where: here,
-      longRunNoticeMs: getLongRunNoticeMs(controls.cfg),
+      // An owner-notify chat already got its @ with the result.
+      longRunNoticeMs: ownerNotifyTarget(controls, chatId) ? undefined : getLongRunNoticeMs(controls.cfg),
     });
   };
   // Turns the agent runs on its own after this reply (a background task it
@@ -2728,7 +2732,8 @@ async function submitBatchRun(
     // 会话智能压缩: the turn that ends the background work may close the
     // conversation — the run's own answer could not while work was pending.
     if (smartSession && turn.kind === 'turn' && turn.background === 0) {
-      const request = newSessionRequest(answerTextOf(finalizeIfRunning(turn.events.reduce(reduce, initialState))));
+      const turnAnswer = answerTextOf(finalizeIfRunning(turn.events.reduce(reduce, initialState)));
+      const request = newSessionRequest(stripBriefMarker(turnAnswer ?? ''));
       if (request) {
         pendingRotations.set(scope, { ...request, ...(run.conversationHandle ? { handle: run.conversationHandle } : {}) });
         log.info('session', 'rotation-requested', { scope, hasSummary: Boolean(request.summary), via: 'background-turn' });
@@ -2738,6 +2743,17 @@ async function submitBatchRun(
     // The work is over: this message's follow-up holds the result; any other
     // message still waiting on it is pointed here.
     run.backgroundSettled = true;
+    // 结果提醒主人: the result only now exists, so the owner's @ goes out here.
+    const ownerNotifyId = ownerNotifyTarget(controls, chatId);
+    if (ownerNotifyId && turn.kind === 'turn') {
+      const notice = planOwnerNotice({
+        ownerId: ownerNotifyId,
+        terminal: 'done',
+        answerText: answerTextOf(finalizeIfRunning(turn.events.reduce(reduce, initialState))),
+        requesters: humanRequesters(deps.batch),
+      });
+      if (notice) await sendLongRunNotice(channel, chatId, notice, sendOpts, scope);
+    }
     await settleWaiting(turn.kind === 'stopped' ? 'stopped' : 'done');
   };
   return {
@@ -3383,7 +3399,21 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         }
       }
     }
-    const longRunNotice = run.runTerminal === 'done' && background > 0 ? undefined : planLongRunNotice({
+    // 结果提醒主人: in the chats the owner reads results in, every finished
+    // run @-mentions the owner with a one-line brief (instead of the long-run
+    // notice). Work still running in the background reports when it ends.
+    const ownerNotifyId = ownerNotifyTarget(controls, chatId);
+    if (ownerNotifyId && !(run.runTerminal === 'done' && background > 0)) {
+      const notice = planOwnerNotice({
+        ownerId: ownerNotifyId,
+        terminal: run.runTerminal,
+        answerText: answerTextOf(run.lastRawState),
+        ...(run.runError ? { error: run.runError } : {}),
+        requesters: humanRequesters(batch),
+      });
+      if (notice) void sendLongRunNotice(channel, chatId, notice, sendOpts, scope);
+    }
+    const longRunNotice = ownerNotifyId || (run.runTerminal === 'done' && background > 0) ? undefined : planLongRunNotice({
       thresholdMs: getLongRunNoticeMs(controls.cfg),
       elapsedMs: Date.now() - runSubmittedAt,
       terminal: run.runTerminal,
@@ -3393,7 +3423,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     });
     if (longRunNotice) void sendLongRunNotice(channel, chatId, longRunNotice, sendOpts, scope);
     if (smartSession && run.runTerminal === 'done') {
-      const request = newSessionRequest(answerTextOf(run.lastRawState));
+      const request = newSessionRequest(stripBriefMarker(answerTextOf(run.lastRawState) ?? ''));
       if (request && background > 0) {
         // Work still running isn't a finished task: closing the conversation
         // now would cut it off from its own results.
@@ -3404,6 +3434,12 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       }
     }
   }
+}
+
+/** The owner to @ at the end of runs in `chatId`, when it is an owner-notify chat (see `ownerNotifyChats`). */
+function ownerNotifyTarget(controls: Controls, chatId: string): string | undefined {
+  const ownerId = controls.botOwnerId;
+  return ownerId && isOwnerNotifyChat(controls.cfg, chatId) ? ownerId : undefined;
 }
 
 /** Chat type for access checks on resume — the same rule intake applies. */

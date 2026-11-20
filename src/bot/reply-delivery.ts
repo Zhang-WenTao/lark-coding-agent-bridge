@@ -86,16 +86,7 @@ export async function deliverAnswerOutsideCard(input: {
   }
 }
 
-/** The answer text of a run state: its final text, else its last text block. */
-export function answerTextOf(state: RunState | undefined): string | undefined {
-  if (!state) return undefined;
-  if (state.finalText) return state.finalText;
-  for (let i = state.blocks.length - 1; i >= 0; i--) {
-    const block = state.blocks[i];
-    if (block?.kind === 'text') return block.content;
-  }
-  return undefined;
-}
+export { answerTextOf } from '../card/run-state';
 
 export interface LazyProgressStream {
   /**
