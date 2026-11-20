@@ -1,6 +1,13 @@
 import { readFile, rename } from 'node:fs/promises';
 import { writeFileAtomic } from './atomic-write';
 
+/** A state file that could not be parsed at load and was moved aside. */
+export interface LoadProblem {
+  path: string;
+  movedTo: string;
+  error: string;
+}
+
 export interface JsonFileOptions {
   /** File mode for writes (default 0600, as {@link writeFileAtomic}). */
   mode?: number;

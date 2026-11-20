@@ -77,6 +77,7 @@ import { autoEffortByline, startAutoEffort, type AutoEffortPick, type AutoEffort
 import { overloadCard } from '../card/templates';
 import { botOwnersOf, BotOverloadGuard, isBotOnlyBatch, isOverloadExempt } from './bot-overload';
 import { fireAndForget } from '../core/fire-and-forget';
+import { notifyCorruptStateFiles } from './state-file-notice';
 import { log, redactDiagnosticText, reportMetric, withTrace } from '../core/logger';
 import { MediaCache, type LocalAttachment } from '../media/cache';
 import {
@@ -1036,6 +1037,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
     appId: cfg.accounts.app.id,
   });
   await ownerRefresh.start();
+  notifyCorruptStateFiles(channel, controls.botOwnerId, [sessions.takeLoadProblem(), workspaces.takeLoadProblem()]);
   const knownChatsRefresh = startKnownChatsRefreshTimer(channel, controls);
 
   const identity = channel.botIdentity;

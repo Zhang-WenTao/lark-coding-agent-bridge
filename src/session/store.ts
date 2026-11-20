@@ -1,7 +1,6 @@
-import { readFile } from 'node:fs/promises';
 import { paths } from '../config/paths';
 import { log } from '../core/logger';
-import { writeFileAtomic } from '../platform/atomic-write';
+import { JsonFile, type LoadProblem } from '../platform/json-file';
 
 export interface SessionEntry {
   /** May be absent if the entry was created by /timeout before any run
@@ -20,41 +19,55 @@ type SessionMap = Record<string, SessionEntry>;
 
 export class SessionStore {
   private data: SessionMap = {};
-  private saving: Promise<void> = Promise.resolve();
-  private readonly path: string;
+  private readonly file: JsonFile;
+  private loadProblem: LoadProblem | undefined;
 
   constructor(path: string = paths.sessionsFile) {
-    this.path = path;
+    this.file = new JsonFile(path, {
+      mode: 0o600,
+      // Unparseable JSON has been moved aside: start empty and let the owner
+      // know. Anything else (unreadable, or the move failed) still refuses to
+      // start, since writing now would replace the only copy.
+      onLoadError: (err, movedTo) => {
+        if (!movedTo) throw err;
+        log.fail('session', err, { step: 'load', movedTo });
+        this.loadProblem = { path, movedTo, error: String(err) };
+      },
+      onPersistError: (err) => log.fail('session', err, { step: 'persist' }),
+    });
+  }
+
+  /** The unparseable file found at load, if any; cleared once read. */
+  takeLoadProblem(): LoadProblem | undefined {
+    const problem = this.loadProblem;
+    this.loadProblem = undefined;
+    return problem;
   }
 
   async load(): Promise<void> {
-    try {
-      const text = await readFile(this.path, 'utf8');
-      const raw = JSON.parse(text) as Record<string, Partial<SessionEntry>>;
-      this.data = {};
-      for (const [chatId, entry] of Object.entries(raw)) {
-        if (!entry || typeof entry.updatedAt !== 'number') continue;
-        // Drop entries without a `cwd`/`sessionId` pair *unless* there's
-        // some other persisted state worth keeping (e.g. an idle-timeout
-        // override). Resuming a session whose cwd we don't know about
-        // would hang claude on a missing jsonl, so resume keys still need
-        // the full pair; but a bare timeout override is fine on its own.
-        const sessionId = typeof entry.sessionId === 'string' ? entry.sessionId : undefined;
-        const cwd = typeof entry.cwd === 'string' ? entry.cwd : undefined;
-        const idleTimeoutMinutes =
-          typeof entry.idleTimeoutMinutes === 'number' ? entry.idleTimeoutMinutes : undefined;
-        const hasSession = sessionId !== undefined && cwd !== undefined;
-        if (!hasSession && idleTimeoutMinutes === undefined) continue;
-        this.data[chatId] = {
-          ...(sessionId !== undefined ? { sessionId } : {}),
-          ...(cwd !== undefined ? { cwd } : {}),
-          updatedAt: entry.updatedAt,
-          ...(idleTimeoutMinutes !== undefined ? { idleTimeoutMinutes } : {}),
-        };
-      }
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
-      throw err;
+    const loaded = await this.file.load();
+    if (loaded === undefined) return;
+    const raw = loaded as Record<string, Partial<SessionEntry>>;
+    this.data = {};
+    for (const [chatId, entry] of Object.entries(raw)) {
+      if (!entry || typeof entry.updatedAt !== 'number') continue;
+      // Drop entries without a `cwd`/`sessionId` pair *unless* there's
+      // some other persisted state worth keeping (e.g. an idle-timeout
+      // override). Resuming a session whose cwd we don't know about
+      // would hang claude on a missing jsonl, so resume keys still need
+      // the full pair; but a bare timeout override is fine on its own.
+      const sessionId = typeof entry.sessionId === 'string' ? entry.sessionId : undefined;
+      const cwd = typeof entry.cwd === 'string' ? entry.cwd : undefined;
+      const idleTimeoutMinutes =
+        typeof entry.idleTimeoutMinutes === 'number' ? entry.idleTimeoutMinutes : undefined;
+      const hasSession = sessionId !== undefined && cwd !== undefined;
+      if (!hasSession && idleTimeoutMinutes === undefined) continue;
+      this.data[chatId] = {
+        ...(sessionId !== undefined ? { sessionId } : {}),
+        ...(cwd !== undefined ? { cwd } : {}),
+        updatedAt: entry.updatedAt,
+        ...(idleTimeoutMinutes !== undefined ? { idleTimeoutMinutes } : {}),
+      };
     }
   }
 
@@ -131,18 +144,11 @@ export class SessionStore {
   }
 
   async flush(): Promise<void> {
-    await this.saving;
+    await this.file.flush();
   }
 
   private schedulePersist(): void {
-    this.saving = this.saving
-      .then(async () => {
-        await writeFileAtomic(this.path, `${JSON.stringify(this.data, null, 2)}\n`, {
-          mode: 0o600,
-        });
-      })
-      .catch((err: unknown) => {
-        log.fail('session', err, { step: 'persist' });
-      });
+    this.file.write(`${JSON.stringify(this.data, null, 2)}
+`);
   }
 }
