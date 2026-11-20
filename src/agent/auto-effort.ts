@@ -8,18 +8,18 @@ import { EFFORT_LEVELS, type AutoEffortPreference, type EffortLevel } from '../c
 
 /**
  * 自动分级: before each chat run, a quick model call rates how hard the
- * message is, and the run's model / effort climb or drop one rung at a time
- * on a ladder (opus·medium → opus·high → opus·xhigh → opus·max by default).
+ * message is, and the run's model / effort move on a ladder (opus·medium →
+ * opus·high → opus·xhigh → opus·max by default): up straight to the rated
+ * rung, down one rung at a time.
  * Fable sits above it as a manual rung: only a `/fable` prefix reaches it, the
  * rating and climbing never do. Rules come first and skip the call:
  *  - a `/<rung>` prefix (`/high`, `/max`, `/fable`, …) pins that rung;
  *  - a short follow-up ("继续", "好的") keeps the current rung, and on a new
  *    conversation starts at the bottom.
  * A new conversation starts wherever the rating says, but never on a rung
- * with a different model than the first (Fable is only reached by climbing):
- * switching models voids the conversation's prompt cache, so it should only
- * happen when the cheaper rungs proved not enough. For the same reason,
- * leaving such a rung downward takes two ratings below it in a row.
+ * with a different model than the first: switching models voids the
+ * conversation's prompt cache. For the same reason, leaving such a rung
+ * downward takes two ratings below it in a row.
  */
 
 export interface AutoEffortRung {
@@ -71,7 +71,6 @@ export const DEFAULT_AUTO_EFFORT_LADDER: readonly AutoEffortRung[] = [
     label: 'max',
     model: 'opus',
     effort: 'max',
-    climbOnly: true,
     hint: '极难：架构级设计、大型改动、上一档反复失败或被用户指出不对仍没解决',
   },
   {
@@ -179,8 +178,9 @@ export function decideRung(input: {
   const target = input.target;
   if (target === undefined || target === cur) return { rung: cur, downVotes: 0, via: 'stay' };
   if (target > cur) {
-    const next = allowed[pos + 1];
-    return next === undefined ? { rung: cur, downVotes: 0, via: 'stay' } : { rung: next, downVotes: 0, via: 'up' };
+    // Climb straight to the rated rung (or the highest allowed under it).
+    const next = allowed[seat(allowed, target)]!;
+    return next > cur ? { rung: next, downVotes: 0, via: 'up' } : { rung: cur, downVotes: 0, via: 'stay' };
   }
   const below = allowed[pos - 1];
   if (below === undefined) return { rung: cur, downVotes: 0, via: 'stay' };

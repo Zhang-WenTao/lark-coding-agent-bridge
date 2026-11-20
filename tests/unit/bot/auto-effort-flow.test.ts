@@ -32,7 +32,7 @@ describe('startAutoEffort', () => {
     classifyMock.mockReset();
   });
 
-  it('starts a new conversation on the rated rung, then climbs one rung per message', async () => {
+  it('starts a new conversation on the rated rung, then climbs to the next rating', async () => {
     const store = new AutoEffortStore();
     classifyMock.mockResolvedValue({ rung: 2, reason: '多系统排障' });
     const first = plan(store);
@@ -128,7 +128,14 @@ describe('startAutoEffort', () => {
     expect(await plan(store).pick('sess-1', true)).toMatchObject({ label: 'medium', via: 'stay' });
   });
 
-  it('keeps the current rung when the rating fails', async () => {
+  it('jumps more than one rung when the rating says so', async () => {
+    const store = new AutoEffortStore();
+    store.set('p2p:ou_owner', { rung: 0, downVotes: 0, handle: 'sess-1' });
+    classifyMock.mockResolvedValue({ rung: 3, reason: '架构级改动' });
+    expect(await plan(store).pick('sess-1', false)).toMatchObject({ label: 'max', via: 'up', from: 'medium' });
+  });
+
+    it('keeps the current rung when the rating fails', async () => {
     const store = new AutoEffortStore();
     store.set('p2p:ou_owner', { rung: 1, downVotes: 0, handle: 'sess-1' });
     classifyMock.mockResolvedValue(undefined);

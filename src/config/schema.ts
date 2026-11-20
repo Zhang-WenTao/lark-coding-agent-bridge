@@ -629,7 +629,7 @@ export const DREAM_DEFAULTS: DreamSettings = {
 /** `preferences.autoEffort` as written in the config file; resolved by `resolveAutoEffort`. */
 export interface AutoEffortPreference {
   enabled?: boolean;
-  /** Bottom to top. Default: opus·medium, opus·high, opus·xhigh, opus·max (climb only), then fable·xhigh (owner only, `/fable` prefix only). */
+  /** Bottom to top. Default: opus·medium, opus·high, opus·xhigh, opus·max, then fable·xhigh (owner only, `/fable` prefix only). */
   ladder?: Array<{ label: string; model: string; effort: EffortLevel; ownerOnly?: boolean; manual?: boolean; climbOnly?: boolean; hint?: string; quotaWindow?: string }>;
   /** Model and effort of the rating call. Default `opus` / `medium`. */
   classifierModel?: string;

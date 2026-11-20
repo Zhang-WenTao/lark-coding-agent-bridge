@@ -45,21 +45,24 @@ describe('allowedRungs', () => {
 });
 
 describe('decideRung', () => {
-  it('starts a new conversation where the rating says, but never on a climb-only or another model', () => {
+  it('starts a new conversation where the rating says, but never on another model', () => {
     expect(decideRung({ ladder, allowed: all, target: 2 })).toEqual({ rung: 2, downVotes: 0, via: 'fresh' });
-    expect(decideRung({ ladder, allowed: all, target: 3 }).rung).toBe(2);
-    expect(decideRung({ ladder, allowed: withFable, target: 4 }).rung).toBe(2);
+    expect(decideRung({ ladder, allowed: all, target: 3 }).rung).toBe(3);
+    expect(decideRung({ ladder, allowed: withFable, target: 4 }).rung).toBe(3);
     expect(decideRung({ ladder, allowed: all }).rung).toBe(0);
     expect(decideRung({ ladder, allowed: [0, 1], target: 2 }).rung).toBe(1);
   });
 
-  it('climbs one rung at a time', () => {
+  it('climbs straight to the rated rung', () => {
     expect(decideRung({ ladder, allowed: all, current: { rung: 0, downVotes: 0 }, target: 3 })).toEqual({
-      rung: 1,
+      rung: 3,
       downVotes: 0,
       via: 'up',
     });
+    expect(decideRung({ ladder, allowed: all, current: { rung: 0, downVotes: 0 }, target: 2 }).rung).toBe(2);
     expect(decideRung({ ladder, allowed: all, current: { rung: 2, downVotes: 0 }, target: 3 }).rung).toBe(3);
+    // Up to the highest allowed rung under the rating.
+    expect(decideRung({ ladder, allowed: [0, 2], current: { rung: 0, downVotes: 0 }, target: 3 }).rung).toBe(2);
   });
 
   it('drops one rung at a time', () => {
