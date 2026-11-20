@@ -289,7 +289,6 @@ function upgradeLegacyRuntimeDefaults(
     !profileConfig.permissions.claude?.permissionMode &&
     profileConfig.permissions.defaultAccess === 'workspace' &&
     profileConfig.permissions.maxAccess === 'workspace';
-  const legacySandboxPolicy = profileConfig.permissionSource === 'sandbox';
   const nextPermissions = shouldUpgradeClaudeDefaultPermissions
     ? { defaultAccess: 'full' as const, maxAccess: 'full' as const }
     : profileConfig.permissions;
@@ -306,7 +305,7 @@ function upgradeLegacyRuntimeDefaults(
     Boolean(profileConfig.codex) &&
     !profileConfig.codex?.codexHome &&
     profileConfig.codex?.ignoreUserConfig === true;
-  const permissionsChanged = legacySandboxPolicy || shouldUpgradeClaudeDefaultPermissions;
+  const permissionsChanged = shouldUpgradeClaudeDefaultPermissions;
   const permissionDefaultsMarkerChanged = !permissionDefaultsMigrated;
   const codexChanged = legacyIsolatedCodexHome || legacyIgnoredUserConfig;
   if (!permissionsChanged && !codexChanged && !permissionDefaultsMarkerChanged) {

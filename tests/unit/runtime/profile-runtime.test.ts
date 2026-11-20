@@ -569,140 +569,6 @@ describe('profile runtime resolver', () => {
     expect(runtime.appPaths.profileDir).toBe(join(root, 'profiles', 'codex-dev'));
   });
 
-  it('canonicalizes legacy Codex sandbox while fixing old Codex runtime defaults', async () => {
-    const root = await tmpRoot();
-    const legacyCodex = createDefaultProfileConfig({
-      agentKind: 'codex',
-      accounts: { app: { ...app, id: 'cli_codex' } },
-      codex: { binaryPath: '/usr/local/bin/codex' },
-    }) as unknown as Record<string, unknown>;
-    legacyCodex.sandbox = {
-      default: 'read-only',
-      max: 'read-only',
-      defaultMode: 'read-only',
-      maxMode: 'read-only',
-    };
-    delete legacyCodex.permissions;
-    delete legacyCodex.permissionSource;
-    (legacyCodex.codex as { inheritCodexHome?: boolean }).inheritCodexHome = false;
-    await writeProfileRoot(root, 'codex-dev', {
-      'codex-dev': legacyCodex,
-    });
-
-    const runtime = await resolveProfileRuntime({ config: join(root, 'config.json') });
-    const saved = JSON.parse(await readFile(join(root, 'config.json'), 'utf8')) as {
-      profiles: Record<string, {
-        permissions?: unknown;
-        sandbox?: unknown;
-        permissionSource?: unknown;
-        codex?: { inheritCodexHome?: boolean; ignoreUserConfig?: boolean };
-      }>;
-    };
-
-    expect(runtime.profileConfig.permissions).toEqual({
-      defaultAccess: 'read-only',
-      maxAccess: 'read-only',
-    });
-    expect(runtime.profileConfig.sandbox).toMatchObject({
-      defaultMode: 'read-only',
-      maxMode: 'read-only',
-    });
-    expect(runtime.profileConfig.codex?.inheritCodexHome).toBe(true);
-    expect(runtime.profileConfig.codex?.ignoreUserConfig).toBe(false);
-    expect(saved.profiles['codex-dev']?.permissions).toEqual({
-      defaultAccess: 'read-only',
-      maxAccess: 'read-only',
-    });
-    expect(saved.profiles['codex-dev']).not.toHaveProperty('sandbox');
-    expect(saved.profiles['codex-dev']).not.toHaveProperty('permissionSource');
-    expect(saved.profiles['codex-dev']?.codex?.inheritCodexHome).toBe(true);
-    expect(saved.profiles['codex-dev']?.codex?.ignoreUserConfig).toBe(false);
-  });
-
-  it('upgrades legacy Claude workspace sandbox default to full access', async () => {
-    const root = await tmpRoot();
-    const legacyClaude = createDefaultProfileConfig({
-      agentKind: 'claude',
-      accounts: { app },
-    }) as unknown as Record<string, unknown>;
-    legacyClaude.sandbox = {
-      default: 'workspace-write',
-      max: 'workspace-write',
-      defaultMode: 'workspace-write',
-      maxMode: 'workspace-write',
-    };
-    delete legacyClaude.permissions;
-    delete legacyClaude.permissionSource;
-    await writeProfileRoot(root, 'claude', { claude: legacyClaude });
-
-    const runtime = await resolveProfileRuntime({ config: join(root, 'config.json') });
-    const saved = JSON.parse(await readFile(join(root, 'config.json'), 'utf8')) as {
-      migrations?: { permissionDefaultsV1?: string[] };
-      profiles: Record<string, {
-        permissions?: unknown;
-        sandbox?: unknown;
-        permissionSource?: unknown;
-      }>;
-    };
-
-    expect(runtime.profileConfig.permissions).toEqual({
-      defaultAccess: 'full',
-      maxAccess: 'full',
-    });
-    expect(runtime.profileConfig.sandbox).toMatchObject({
-      defaultMode: 'danger-full-access',
-      maxMode: 'danger-full-access',
-    });
-    expect(saved.profiles.claude?.permissions).toEqual({
-      defaultAccess: 'full',
-      maxAccess: 'full',
-    });
-    expect(saved.profiles.claude).not.toHaveProperty('sandbox');
-    expect(saved.profiles.claude).not.toHaveProperty('permissionSource');
-    expect(saved.migrations?.permissionDefaultsV1).toContain('claude');
-  });
-
-  it('canonicalizes legacy Claude read-only sandbox without widening permissions', async () => {
-      const root = await tmpRoot();
-      const legacyClaude = createDefaultProfileConfig({
-        agentKind: 'claude',
-        accounts: { app },
-      }) as unknown as Record<string, unknown>;
-      legacyClaude.sandbox = {
-        default: 'read-only',
-        max: 'read-only',
-        defaultMode: 'read-only',
-        maxMode: 'read-only',
-      };
-      delete legacyClaude.permissions;
-      delete legacyClaude.permissionSource;
-      await writeProfileRoot(root, 'claude', { claude: legacyClaude });
-
-      const runtime = await resolveProfileRuntime({ config: join(root, 'config.json') });
-      const saved = JSON.parse(await readFile(join(root, 'config.json'), 'utf8')) as {
-        profiles: Record<string, {
-          permissions?: unknown;
-          sandbox?: unknown;
-          permissionSource?: unknown;
-        }>;
-      };
-
-      expect(runtime.profileConfig.permissions).toEqual({
-        defaultAccess: 'read-only',
-        maxAccess: 'read-only',
-      });
-      expect(runtime.profileConfig.sandbox).toMatchObject({
-        defaultMode: 'read-only',
-        maxMode: 'read-only',
-      });
-      expect(saved.profiles.claude?.permissions).toEqual({
-        defaultAccess: 'read-only',
-        maxAccess: 'read-only',
-      });
-      expect(saved.profiles.claude).not.toHaveProperty('sandbox');
-      expect(saved.profiles.claude).not.toHaveProperty('permissionSource');
-  });
-
   it('upgrades unmarked canonical Claude workspace defaults from internal migrations', async () => {
     const root = await tmpRoot();
     const claude = createDefaultProfileConfig({
@@ -804,47 +670,6 @@ describe('profile runtime resolver', () => {
     expect(saved.migrations?.permissionDefaultsV1).toContain('claude');
   });
 
-  it('keeps legacy Claude mixed lower sandbox permissions when resolving an existing profile', async () => {
-    const root = await tmpRoot();
-    const legacyClaude = createDefaultProfileConfig({
-      agentKind: 'claude',
-      accounts: { app },
-    }) as unknown as Record<string, unknown>;
-    legacyClaude.sandbox = {
-      default: 'read-only',
-      max: 'workspace-write',
-      defaultMode: 'read-only',
-      maxMode: 'workspace-write',
-    };
-    delete legacyClaude.permissions;
-    delete legacyClaude.permissionSource;
-    await writeProfileRoot(root, 'claude', { claude: legacyClaude });
-
-    const runtime = await resolveProfileRuntime({ config: join(root, 'config.json') });
-    const saved = JSON.parse(await readFile(join(root, 'config.json'), 'utf8')) as {
-      profiles: Record<string, {
-        permissions?: unknown;
-        sandbox?: unknown;
-        permissionSource?: unknown;
-      }>;
-    };
-
-    expect(runtime.profileConfig.permissions).toEqual({
-      defaultAccess: 'read-only',
-      maxAccess: 'workspace',
-    });
-    expect(runtime.profileConfig.sandbox).toMatchObject({
-      defaultMode: 'read-only',
-      maxMode: 'workspace-write',
-    });
-    expect(saved.profiles.claude?.permissions).toEqual({
-      defaultAccess: 'read-only',
-      maxAccess: 'workspace',
-    });
-    expect(saved.profiles.claude).not.toHaveProperty('sandbox');
-    expect(saved.profiles.claude).not.toHaveProperty('permissionSource');
-  });
-
   it('keeps explicit canonical lower permissions when resolving an existing profile', async () => {
     const root = await tmpRoot();
     const claude = createDefaultProfileConfig({
@@ -882,7 +707,7 @@ describe('profile runtime resolver', () => {
     expect(saved.profiles.claude).not.toHaveProperty('permissionSource');
   });
 
-  it('upgrades legacy isolated Codex config even after sandbox was already upgraded', async () => {
+  it('upgrades legacy isolated Codex config when the profile has no explicit permissions', async () => {
     const root = await tmpRoot();
     const legacyCodex = createDefaultProfileConfig({
       agentKind: 'codex',
@@ -891,6 +716,7 @@ describe('profile runtime resolver', () => {
     }) as unknown as Record<string, unknown>;
     delete legacyCodex.permissions;
     delete legacyCodex.permissionSource;
+    delete legacyCodex.sandbox;
     (legacyCodex.codex as { inheritCodexHome?: boolean }).inheritCodexHome = false;
     (legacyCodex.codex as { ignoreUserConfig?: boolean }).ignoreUserConfig = true;
     await writeProfileRoot(root, 'codex-dev', {

@@ -451,25 +451,27 @@ describe('profile schema', () => {
     });
   });
 
-  it('maps legacy sandbox aliases into canonical permissions when permissions are absent', () => {
+  it('refuses a legacy sandbox block that has no permissions next to it', () => {
+    expect(() =>
+      normalizeProfileConfig({
+        schemaVersion: 2,
+        agentKind: 'claude',
+        accounts: { app },
+        sandbox: { defaultMode: 'read-only', maxMode: 'read-only' },
+      }),
+    ).toThrow(/legacy `sandbox` block is no longer supported/);
+  });
+
+  it('ignores the derived sandbox copy next to canonical permissions', () => {
     const cfg = normalizeProfileConfig({
       schemaVersion: 2,
       agentKind: 'claude',
       accounts: { app },
-      sandbox: {
-        defaultMode: 'read-only',
-        maxMode: 'workspace-write',
-      },
+      sandbox: { defaultMode: 'danger-full-access', maxMode: 'danger-full-access' },
+      permissions: { defaultAccess: 'read-only', maxAccess: 'workspace' },
     });
-
-    expect(cfg.permissions).toMatchObject({
-      defaultAccess: 'read-only',
-      maxAccess: 'workspace',
-    });
-    expect(cfg.sandbox).toMatchObject({
-      defaultMode: 'read-only',
-      maxMode: 'workspace-write',
-    });
+    expect(cfg.permissions).toMatchObject({ defaultAccess: 'read-only', maxAccess: 'workspace' });
+    expect(cfg.permissionSource).toBe('permissions');
   });
 
   it('lets canonical permissions win over stale legacy sandbox fields', () => {
@@ -533,31 +535,6 @@ describe('profile schema', () => {
     expect(clampAccess('full', 'workspace', 'full')).toBe('workspace');
     expect(clampAccess('workspace', 'full', 'read-only')).toBe('read-only');
     expect(clampAccess('read-only', 'full', 'full')).toBe('read-only');
-  });
-
-  it('keeps legacy sandbox access when canonical permissions only set Claude override', () => {
-    const cfg = normalizeProfileConfig({
-      schemaVersion: 2,
-      agentKind: 'claude',
-      accounts: { app },
-      sandbox: {
-        defaultMode: 'read-only',
-        maxMode: 'read-only',
-      },
-      permissions: {
-        claude: {
-          permissionMode: 'plan',
-        },
-      },
-    });
-
-    expect(cfg.permissions).toMatchObject({
-      defaultAccess: 'read-only',
-      maxAccess: 'read-only',
-      claude: {
-        permissionMode: 'plan',
-      },
-    });
   });
 
   it('rejects Claude permission overrides wider than max access', () => {
@@ -626,26 +603,6 @@ describe('profile schema', () => {
         },
       }),
     ).toThrow(/permission/i);
-  });
-
-  it('does not raise legacy default access when only canonical max access is explicit', () => {
-    const cfg = normalizeProfileConfig({
-      schemaVersion: 2,
-      agentKind: 'claude',
-      accounts: { app },
-      sandbox: {
-        defaultMode: 'read-only',
-        maxMode: 'danger-full-access',
-      },
-      permissions: {
-        maxAccess: 'workspace',
-      },
-    });
-
-    expect(cfg.permissions).toMatchObject({
-      defaultAccess: 'read-only',
-      maxAccess: 'workspace',
-    });
   });
 
   it('clamps default access from full defaults when only canonical max access is explicit', () => {

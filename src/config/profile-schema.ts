@@ -382,7 +382,6 @@ export interface CreateDefaultProfileConfigInput {
   };
   preferences?: AppPreferences;
   access?: Partial<ProfileAccess>;
-  sandbox?: Partial<SandboxConfig>;
   permissions?: Partial<PermissionConfig>;
   codex?: CodexConfig;
   secrets?: SecretsConfig;

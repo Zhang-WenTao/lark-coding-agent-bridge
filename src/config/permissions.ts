@@ -10,14 +10,7 @@ export interface PermissionConfig {
   };
 }
 
-export type PermissionSource = 'permissions' | 'sandbox' | 'default';
-
-interface LegacySandboxInput {
-  default?: CodexSandboxMode;
-  max?: CodexSandboxMode;
-  defaultMode?: CodexSandboxMode;
-  maxMode?: CodexSandboxMode;
-}
+export type PermissionSource = 'permissions' | 'default';
 
 export interface NormalizedPermissions {
   permissions: PermissionConfig;
@@ -39,24 +32,27 @@ const CLAUDE_PERMISSION_ACCESS: Record<ClaudePermissionMode, AccessMode> = {
 
 export function normalizePermissions(input: {
   permissions?: Partial<PermissionConfig> | undefined;
-  sandbox?: Partial<LegacySandboxInput> | undefined;
+  /**
+   * The pre-`permissions` sandbox block. No longer read. Next to `permissions`
+   * it is only the derived copy a normalized profile carries (ignored); on its
+   * own it is an old config whose limits would otherwise be silently lost, so
+   * refuse it.
+   */
+  sandbox?: unknown;
 }): NormalizedPermissions {
-  const hasSandbox = hasLegacySandbox(input.sandbox);
-  const base = hasSandbox
-    ? normalizeLegacySandboxPermissions(input.sandbox)
-    : defaultPermissions();
-
+  if (input.sandbox !== undefined && input.permissions === undefined) {
+    throw new Error(
+      'the legacy `sandbox` block is no longer supported; replace it with `permissions` ' +
+        '(defaultAccess / maxAccess: read-only | workspace | full)',
+    );
+  }
   if (input.permissions !== undefined) {
     return {
-      permissions: normalizeCanonicalPermissions(input.permissions, base),
+      permissions: normalizeCanonicalPermissions(input.permissions, defaultPermissions()),
       source: 'permissions',
     };
   }
-
-  return {
-    permissions: base,
-    source: hasSandbox ? 'sandbox' : 'default',
-  };
+  return { permissions: defaultPermissions(), source: 'default' };
 }
 
 export function assertAccessPair(
@@ -189,25 +185,6 @@ function assertClaudePermissionWithinAccess(
   }
 }
 
-function normalizeLegacySandboxPermissions(
-  input: Partial<LegacySandboxInput> | undefined,
-): PermissionConfig {
-  if (!isConfigObject(input)) {
-    throw new Error('invalid sandbox mode');
-  }
-
-  const maxMode = readSandboxMode(input.max ?? input.maxMode, 'maxMode') ?? 'danger-full-access';
-  const defaultMode = readSandboxMode(input.default ?? input.defaultMode, 'defaultMode') ?? maxMode;
-  const defaultAccess = codexSandboxToAccess(defaultMode);
-  const maxAccess = codexSandboxToAccess(maxMode);
-  assertAccessPair(defaultAccess, maxAccess, 'sandbox');
-
-  return {
-    defaultAccess,
-    maxAccess,
-  };
-}
-
 function normalizeClaudePermissions(
   input: PermissionConfig['claude'] | undefined,
 ): PermissionConfig['claude'] | undefined {
@@ -228,21 +205,6 @@ function normalizeClaudePermissions(
   };
 }
 
-function hasLegacySandbox(input: Partial<LegacySandboxInput> | undefined): boolean {
-  if (input === undefined) {
-    return false;
-  }
-  if (!isConfigObject(input)) {
-    throw new Error('invalid sandbox mode');
-  }
-  return (
-    input.default !== undefined ||
-    input.max !== undefined ||
-    input.defaultMode !== undefined ||
-    input.maxMode !== undefined
-  );
-}
-
 function readAccess(value: unknown, field: string): AccessMode | undefined {
   if (value === undefined) {
     return undefined;
@@ -253,26 +215,12 @@ function readAccess(value: unknown, field: string): AccessMode | undefined {
   return value;
 }
 
-function readSandboxMode(value: unknown, field: string): CodexSandboxMode | undefined {
-  if (value === undefined) {
-    return undefined;
-  }
-  if (!isCodexSandboxMode(value)) {
-    throw new Error(`invalid sandbox ${field}`);
-  }
-  return value;
-}
-
 function isAccessMode(value: unknown): value is AccessMode {
   return value === 'read-only' || value === 'workspace' || value === 'full';
 }
 
 function isConfigObject(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
-}
-
-function isCodexSandboxMode(value: unknown): value is CodexSandboxMode {
-  return value === 'read-only' || value === 'workspace-write' || value === 'danger-full-access';
 }
 
 function isClaudePermissionMode(value: unknown): value is ClaudePermissionMode {
