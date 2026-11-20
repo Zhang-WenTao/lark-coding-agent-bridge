@@ -160,6 +160,12 @@ describe('AutoResumer', () => {
     await first.schedule(pending());
     expect(JSON.parse(await readFile(file, 'utf8')).resumes.oc_dm.resumeAt).toBe(5_000);
 
+    // A schedule nobody awaited (a run's finally at shutdown) is on disk after flush().
+    void first.schedule(pending({ resumeAt: 6_000 }));
+    await first.flush();
+    expect(JSON.parse(await readFile(file, 'utf8')).resumes.oc_dm.resumeAt).toBe(6_000);
+    await first.schedule(pending());
+
     // A new process picks it up from disk.
     const second = new AutoResumer({ file, fire });
     await second.load();

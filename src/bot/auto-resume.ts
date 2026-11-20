@@ -187,6 +187,11 @@ export class AutoResumer {
     }
   }
 
+  /** Wait for every queued write (disconnect: `void schedule()` calls from finished runs). */
+  flush(): Promise<void> {
+    return this.file.flush();
+  }
+
   private persist(): Promise<void> {
     if (!this.opts.file) return Promise.resolve();
     const data: ResumeFile = { resumes: Object.fromEntries(this.resumes) };

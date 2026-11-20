@@ -1202,6 +1202,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
         autoEfforts,
         codeSnippets,
         noteExposure,
+        autoResumer,
       ];
       const [disconnectResult, ...flushResults] = await Promise.allSettled([
         channel.disconnect(),
