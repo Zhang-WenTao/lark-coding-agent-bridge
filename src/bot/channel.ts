@@ -99,7 +99,7 @@ import {
   toPromptContextMessage,
 } from './prompt-build';
 import { log, redactDiagnosticText, reportMetric, withTrace } from '../core/logger';
-import { MediaCache } from '../media/cache';
+import { MediaCache, type LocalAttachment } from '../media/cache';
 import {
   toPolicyAttachment,
 } from '../media/attachment';
@@ -1945,37 +1945,13 @@ interface BatchRunState {
   answerIsNewMessage: boolean;
 }
 
-async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
-  const {
-    channel,
-    executor,
-    sessions,
-    sessionCatalog,
-    workspaces,
-    media,
-    batch,
-    controls,
-    cotClient,
-    callbackAuth,
-    activePolicyFingerprints,
-    lastRunModelByScope,
-    pendingRotations,
-    backgroundOrigins,
-    contextCursors,
-    scope,
-    mode,
-    runs,
-    knowledge,
-    autoResumer,
-  } = deps;
-  if (batch.length === 0) return;
-  const firstMsg = batch[0];
-  const lastMsg = batch[batch.length - 1];
-  if (!firstMsg || !lastMsg) return;
-
-  const chatId = firstMsg.chatId;
-  const threadId = firstMsg.threadId;
-
+/** 过载保护 for a batch. True: the batch stops here (a card may have said why). */
+async function stopForBotOverload(
+  deps: RunBatchDeps,
+  input: { chatId: string; threadId: string | undefined; lastMsg: NormalizedMessage },
+): Promise<boolean> {
+  const { channel, batch, controls, scope, mode } = deps;
+  const { chatId, threadId, lastMsg } = input;
   // 过载保护: other bots' questions wait while the quota is tight; humans never do.
   const overload = resolveBotOverload(controls.cfg);
   if (
@@ -2008,10 +1984,20 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
           .send(chatId, { card }, { replyTo: lastMsg.messageId, ...(mode === 'topic' && threadId ? { replyInThread: true } : {}) })
           .catch((err: unknown) => log.fail('overload', err, { step: 'send-card' }));
       }
-      return;
+      return true;
     }
   }
+  return false;
+}
 
+/** The batch's attachments, and the earlier messages it quotes. */
+async function resolveBatchInputs(deps: RunBatchDeps): Promise<{
+  attachments: LocalAttachment[];
+  batchIds: Set<string>;
+  quoteTargets: string[];
+  quotes: QuotedContext[];
+}> {
+  const { channel, media, batch, controls, mode } = deps;
   const resourceItems = batch.flatMap((m) =>
     m.resources.map((r) => ({ messageId: m.messageId, resource: r })),
   );
@@ -2053,7 +2039,16 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       });
     }
   }
+  return { attachments, batchIds, quoteTargets, quotes };
+}
 
+/** 指定模型 / 自动分级 for a batch: the scope's model pin, else the rating plan (if 自动分级 is on). */
+function planBatchAutoEffort(
+  deps: RunBatchDeps,
+  input: { chatId: string; attachments: LocalAttachment[]; quotes: QuotedContext[] },
+): { modelPin: ReturnType<NonNullable<Controls['modelPins']>['get']>; autoEffortPlan: AutoEffortPlan | undefined } {
+  const { batch, controls, scope, mode } = deps;
+  const { chatId, attachments, quotes } = input;
   // 自动分级: rate the message while the rest of the run is prepared; the
   // rung is settled once startRunFlow knows which conversation it resumes.
   const autoEffortSettings = deps.autoEfforts
@@ -2088,6 +2083,44 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
           },
         })
       : undefined;
+  return { modelPin, autoEffortPlan };
+}
+
+async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
+  const {
+    channel,
+    executor,
+    sessions,
+    sessionCatalog,
+    workspaces,
+    batch,
+    controls,
+    cotClient,
+    callbackAuth,
+    activePolicyFingerprints,
+    lastRunModelByScope,
+    pendingRotations,
+    backgroundOrigins,
+    contextCursors,
+    scope,
+    mode,
+    runs,
+    knowledge,
+    autoResumer,
+  } = deps;
+  if (batch.length === 0) return;
+  const firstMsg = batch[0];
+  const lastMsg = batch[batch.length - 1];
+  if (!firstMsg || !lastMsg) return;
+
+  const chatId = firstMsg.chatId;
+  const threadId = firstMsg.threadId;
+
+  if (await stopForBotOverload(deps, { chatId, threadId, lastMsg })) return;
+
+  const { attachments, batchIds, quoteTargets, quotes } = await resolveBatchInputs(deps);
+
+  const { modelPin, autoEffortPlan } = planBatchAutoEffort(deps, { chatId, attachments, quotes });
   const run: BatchRunState = { backgroundSettled: false, answerIsNewMessage: false };
 
   // 群聊 / 话题上下文: Feishu only delivers the group messages that @ the bot,
