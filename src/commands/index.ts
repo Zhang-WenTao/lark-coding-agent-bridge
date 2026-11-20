@@ -1,4 +1,3 @@
-import { readFile } from 'node:fs/promises';
 import { basename } from 'node:path';
 import { agentAccountsReport, agentAccountsTable, switchAgentAccount } from '../agent/account';
 import { agentCapability } from '../agent/capability';
@@ -63,10 +62,7 @@ import {
   pullRequestCard,
   skillLibrariesCard,
   skillsCard,
-  statusCard,
-  taskStatusCard,
   usageCard,
-  type StatusInfo,
   worktreeCard,
 } from '../card/templates';
 import {
@@ -78,7 +74,7 @@ import {
 } from '../git/diff';
 import { isGitError } from '../git/exec';
 import { checksLabel, parsePrArg, readPullRequest, reviewLabel } from '../git/pr';
-import { describeRepoStatus, isDirty, readRepoStatus, type GitRepoStatus } from '../git/status';
+import { isDirty, readRepoStatus, type GitRepoStatus } from '../git/status';
 import { addWorktree, listWorktrees, matchWorktree, removeWorktree } from '../git/worktree';
 import type { Scheduler } from '../scheduler/scheduler';
 import {
@@ -122,17 +118,8 @@ import type {
   SkillLibraryConfig,
 } from '../config/profile-schema';
 import { effectiveLarkCliIdentity } from '../config/profile-schema';
-import { describeActiveRun } from '../bot/run-status';
-import { formatMoment, limitLabel } from '../bot/auto-resume';
 import { parseClaudeUsage, readClaudeUsage, usageMarkdown } from './usage';
-import { accessToClaudePermissionMode } from '../config/permissions';
-import {
-  canRunAdminCommand,
-  canRunCommandInChat,
-  canStopRun,
-  canUseDm,
-  canUseGroup,
-} from '../policy/access';
+import { canRunAdminCommand, canRunCommandInChat, canUseDm, canUseGroup } from '../policy/access';
 import { buildEncryptedAccountConfig } from '../config/store';
 import * as configOps from '../config/config-ops';
 import { log, reportMetric } from '../core/logger';
@@ -144,7 +131,7 @@ import {
   reduce,
   type RunState,
 } from '../card/run-state';
-import { isAlive, readAndPrune, resolveTarget } from '../runtime/registry';
+import { isAlive } from '../runtime/registry';
 import { readUiSidecar } from '../ui/sidecar';
 import { resolveWorkingDirectory } from '../policy/workspace';
 import { evaluateRunPolicy } from '../policy/run-policy';
@@ -153,13 +140,10 @@ import { RunRejected } from '../runtime/errors';
 import { validateAppCredentials } from '../utils/feishu-auth';
 import { fetchKnownChats } from '../bot/lark-info';
 import { codeBlockPost } from '../card/code-snippets';
-import { decideRotation } from '../session/smart-session';
-import { probeAgentSession } from '../agent/session-probe';
 import { describeMeetingError, type MeetingManager } from '../meeting/manager';
 import { isMeetingNo } from '../meeting/api';
 import { answerInMeeting, meetingScopeId } from '../meeting/orchestrator';
 import type { MeetingSession } from '../meeting/session';
-import { hasStructuredLarkCliUserAuth } from '../lark-cli/identity-policy';
 import { isPlainCoffeeRequest } from './coffee-intent';
 import {
   formatDreamPrs,
@@ -178,6 +162,14 @@ import {
   handleWs,
 } from './handlers/workspace';
 import { handleResume } from './handlers/resume';
+import { formatOwnerState, handleStatus, runtimeAccessStatus } from './handlers/status';
+import {
+  handleExit,
+  handlePs,
+  handleReconnect,
+  handleStop,
+  handleTimeout,
+} from './handlers/lifecycle';
 
 export type { CommandContext, Controls } from './types';
 
@@ -349,411 +341,6 @@ async function handleCopyCode(args: string, ctx: CommandContext): Promise<void> 
   } catch (err) {
     log.fail('command', err, { step: 'copycode' });
     await reply(ctx, '代码发送失败，请稍后再点一次。');
-  }
-}
-
-function runtimeAccessStatus(
-  profileConfig: ProfileConfig,
-): { label: string; value: string } {
-  if (agentDescriptor(profileConfig.agentKind).accessControl === 'permission-mode') {
-    return {
-      label: 'permission',
-      value: accessToClaudePermissionMode(
-        profileConfig.permissions.defaultAccess,
-        profileConfig.permissions,
-      ),
-    };
-  }
-  return {
-    label: 'sandbox',
-    value: `${profileConfig.sandbox.defaultMode}/${profileConfig.sandbox.maxMode}`,
-  };
-}
-
-async function larkCliStatus(ctx: CommandContext): Promise<'app' | 'user-ready' | 'user-missing' | 'check-failed'> {
-  const appPaths = commandProfilePaths(ctx);
-  try {
-    const raw = JSON.parse(await readFile(appPaths.larkCliTargetConfigFile, 'utf8')) as {
-      apps?: Array<{
-        appId?: string;
-        brand?: string;
-        defaultAs?: string;
-        strictMode?: string;
-        users?: unknown;
-      }>;
-    };
-    const app = raw.apps?.find(
-      (candidate) =>
-        candidate.appId === ctx.controls.profileConfig.accounts.app.id &&
-        candidate.brand === ctx.controls.profileConfig.accounts.app.tenant,
-    );
-    if (app?.defaultAs === 'auto' && app.strictMode === 'off' && hasStructuredLarkCliUserAuth(app.users)) {
-      return 'user-ready';
-    }
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') return 'check-failed';
-  }
-  if (
-    ctx.controls.profileConfig.larkCli.identityPreset === 'user-default' &&
-    canRunAdminCommand(ctx.controls.profileConfig, ctx.controls, ctx.msg.senderId).ok
-  ) {
-    return 'user-missing';
-  }
-  return 'app';
-}
-
-async function handleStatus(_args: string, ctx: CommandContext): Promise<void> {
-  const cwd = effectiveWorkspaceCwd(ctx);
-  const activeHandle = ctx.activeRuns.get(ctx.scope);
-  const pendingResume = ctx.autoResumer?.get(ctx.scope);
-  // Workspace paths, session ids, git and account state are the owner's
-  // business; everyone else only needs to know how their task is doing.
-  if (!canRunAdminCommand(ctx.controls.profileConfig, ctx.controls, ctx.msg.senderId).ok) {
-    const card = taskStatusCard({
-      ...(activeHandle ? { activeRun: describeActiveRun(activeHandle) } : {}),
-      ...(pendingResume
-        ? {
-            autoResume: `${limitLabel(pendingResume.limitType)}用完暂停，${formatMoment(pendingResume.resumeAt)} 自动继续（发 /stop 取消）`,
-          }
-        : {}),
-    });
-    await ctx.channel.send(ctx.msg.chatId, { card }, commandReplyOptions(ctx));
-    return;
-  }
-  const sess = ctx.sessions.getRaw(ctx.scope);
-  // Scope-store agents report the scope's session (and whether its cwd went
-  // stale); the rest report the catalog entry for the current context.
-  const descriptor = agentDescriptor(ctx.controls.profileConfig.agentKind);
-  const catalogEntry =
-    !descriptor.scopeSessionStore && ctx.sessionCatalog && ctx.sessionCatalogIdentity
-      ? ctx.sessionCatalog.activeFor(ctx.sessionCatalogIdentity)
-      : undefined;
-  const sessionId = descriptor.scopeSessionStore ? sess?.sessionId : catalogEntry?.[descriptor.sessionHandle];
-  const sessionStale = descriptor.scopeSessionStore && Boolean(cwd && sess && sess.cwd !== cwd);
-  const card = statusCard({
-    profileName: ctx.controls.profile,
-    cwd,
-    sessionId,
-    emptySessionText: descriptor.scopeSessionStore ? undefined : '(未建立)',
-    sessionStale,
-    ...(sessionId && !sessionStale
-      ? await sessionContextStatus(ctx, sessionId, (descriptor.scopeSessionStore ? sess?.cwd : undefined) ?? cwd)
-      : {}),
-    agentName: ctx.agent.displayName,
-    runtimeAccess: runtimeAccessStatus(ctx.controls.profileConfig),
-    larkCliStatus: await larkCliStatus(ctx),
-    ...(await gitStatusLine(cwd)),
-    ...(await knowledgeStatusLine(ctx)),
-    activeRun: Boolean(ctx.activeRuns.get(ctx.scope)),
-    ...(activeHandle ? { activeRunDetail: describeActiveRun(activeHandle) } : {}),
-    ...(pendingResume
-      ? {
-          autoResume: `${limitLabel(pendingResume.limitType)}用完暂停，${formatMoment(pendingResume.resumeAt)} 自动继续（发 /stop 取消）`,
-        }
-      : {}),
-    backgroundRun: ctx.activeRuns.isLingering(ctx.scope),
-    activeScopes: ctx.activeRuns.scopes().filter((scope) => !scope.startsWith('comment:')),
-    activeCommentScopes: ctx.activeRuns.scopes().filter((scope) => scope.startsWith('comment:')),
-    queue: ctx.processPool?.snapshot(),
-    ownerState: formatOwnerState(ctx),
-    scope: ctx.scope,
-    chatMode: ctx.chatMode,
-  });
-  await ctx.channel.send(ctx.msg.chatId, { card }, commandReplyOptions(ctx));
-}
-
-/**
- * How big the conversation the next message would resume has grown, and —
- * with 会话智能压缩 on — whether that message will start a fresh one instead.
- * Read from the agent's own transcript; absent when it can't be read.
- */
-async function sessionContextStatus(
-  ctx: CommandContext,
-  handle: string,
-  cwd: string | undefined,
-): Promise<Pick<StatusInfo, 'context'>> {
-  if (!cwd) return {};
-  const probe = await probeAgentSession(ctx.controls.profileConfig, handle, cwd);
-  if (!probe || (probe.contextTokens === undefined && probe.lastActivityAt === undefined)) return {};
-  const now = Date.now();
-  const smartSession = getSmartSession(ctx.controls.cfg);
-  const pending = ctx.controls.pendingRotations?.get(ctx.scope);
-  const verdict =
-    smartSession && !ctx.runExecutor?.hasLiveProcess(ctx.scope)
-      ? decideRotation({ settings: smartSession, probe, ...(pending ? { pending } : {}), resumeHandle: handle, now })
-      : undefined;
-  return {
-    context: {
-      ...(probe.contextTokens !== undefined ? { tokens: probe.contextTokens } : {}),
-      ...(probe.lastActivityAt !== undefined
-        ? { idleMinutes: Math.max(0, Math.floor((now - probe.lastActivityAt) / 60_000)) }
-        : {}),
-      ...(verdict ? { rotateReason: verdict.reason } : {}),
-    },
-  };
-}
-
-function formatOwnerState(ctx: CommandContext): string {
-  const state = ctx.controls.ownerRefreshState;
-  const owner = ctx.controls.botOwnerId ? 'present' : 'missing';
-  const refreshed = ctx.controls.ownerRefreshedAt
-    ? ` refreshed=${new Date(ctx.controls.ownerRefreshedAt).toISOString()}`
-    : '';
-  return `${state} owner=${owner}${refreshed}`;
-}
-
-async function handleStop(args: string, ctx: CommandContext): Promise<void> {
-  const targetScope = args.trim();
-  if (targetScope && !canRunAdminCommand(ctx.controls.profileConfig, ctx.controls, ctx.msg.senderId).ok) {
-    await reply(ctx, '❌ 指定 scope 停止任务仅管理员可用。');
-    return;
-  }
-  const scope = targetScope || ctx.scope;
-  if (!targetScope) {
-    const running = ctx.activeRuns.get(scope);
-    const decision = running
-      ? canStopRun(
-          ctx.controls.profileConfig,
-          ctx.controls,
-          ctx.msg.senderId,
-          running.supplement?.initiators,
-        )
-      : undefined;
-    if (decision && !decision.ok) {
-      log.info('command', 'stop-deny', {
-        scope,
-        sender: ctx.msg.senderId.slice(-6),
-        via: ctx.fromCardAction ? 'card' : 'command',
-      });
-      await reply(ctx, '❌ 只有任务的发起人、bot 主人、管理员或终止白名单里的人可以终止这个任务。');
-      return;
-    }
-  }
-  const stopped = ctx.activeRuns.interruptDetailed(scope);
-  const ok = stopped.active || stopped.background;
-  if (!targetScope && !ok) {
-    // Nothing running, but a quota-paused task may be waiting to resume.
-    const waiting = ctx.autoResumer?.get(scope);
-    if (waiting) {
-      const decision = canStopRun(
-        ctx.controls.profileConfig,
-        ctx.controls,
-        ctx.msg.senderId,
-        new Set([waiting.senderId]),
-      );
-      if (!decision.ok) {
-        await reply(ctx, '❌ 只有任务的发起人、bot 主人、管理员或终止白名单里的人可以取消自动续跑。');
-        return;
-      }
-      await ctx.autoResumer?.cancel(scope, 'stop-command');
-      await reply(ctx, `已取消自动续跑（原定 ${formatMoment(waiting.resumeAt)}）。需要时发「继续」即可接着做。`);
-      return;
-    }
-  }
-  log.info('command', 'stop', {
-    scope,
-    targeted: Boolean(targetScope),
-    interrupted: ok,
-    background: stopped.background,
-  });
-  if (targetScope) {
-    await reply(
-      ctx,
-      ok
-        ? `已请求停止 \`${scope}\`。`
-        : `未找到正在运行的任务：\`${scope}\`。`,
-    );
-  }
-  // No reply for the current IM scope when a run was in flight: its render
-  // loop marks the card as interrupted. Background work has no card to mark.
-  else if (stopped.background && !stopped.active) {
-    await reply(ctx, '已停止后台任务。');
-  }
-}
-
-async function handleTimeout(args: string, ctx: CommandContext): Promise<void> {
-  const trimmed = args.trim().toLowerCase();
-  const parsed = parseTimeoutTarget(trimmed, ctx.scope);
-  if (
-    parsed.targeted &&
-    !canRunAdminCommand(ctx.controls.profileConfig, ctx.controls, ctx.msg.senderId).ok
-  ) {
-    await reply(ctx, '❌ 指定 scope 设置 timeout 仅管理员可用。');
-    return;
-  }
-  const scope = parsed.scope;
-  const value = parsed.value;
-  const globalMs = getRunIdleTimeoutMs(ctx.controls.cfg);
-  const globalMinutes = globalMs ? Math.round(globalMs / 60_000) : 0;
-  const formatGlobal = (): string =>
-    globalMinutes > 0 ? `${globalMinutes} 分钟` : '未启用';
-
-  // /timeout — show effective value + source
-  if (!value) {
-    const scopeMinutes = ctx.sessions.getIdleTimeoutMinutes(scope);
-    const usage =
-      '\n\n用法:\n- `/timeout 15` 当前 session 设 15 分钟\n- `/timeout off` 当前 session 关闭探活\n- `/timeout default` 清除 session 覆盖,回退全局\n- `/timeout comment:<scopeHash> 15` 管理员设置 comment scope\n\n_注:`/new` 会清掉当前 session 的覆盖,回到全局_';
-    const scopeLabel = parsed.targeted ? ` (${scope})` : '';
-    if (scopeMinutes !== undefined) {
-      const effective =
-        scopeMinutes > 0 ? `${scopeMinutes} 分钟` : '已关闭（当前 session）';
-      await reply(ctx, `⏱ 当前 session${scopeLabel} 探活:${effective}\n全局默认:${formatGlobal()}${usage}`);
-      return;
-    }
-    await reply(ctx, `⏱ 当前 session${scopeLabel} 探活:跟随全局(${formatGlobal()})${usage}`);
-    return;
-  }
-
-  if (value === 'default') {
-    const cleared = ctx.sessions.clearIdleTimeoutOverride(scope);
-    log.info('command', 'timeout-clear', { scope, cleared, targeted: parsed.targeted });
-    await reply(
-      ctx,
-      cleared
-        ? `✅ 已清除 session 覆盖,回退到全局(${formatGlobal()})。`
-        : `当前 session 本来就没设过覆盖,跟随全局(${formatGlobal()})。`,
-    );
-    return;
-  }
-
-  if (value === 'off' || value === '0') {
-    ctx.sessions.setIdleTimeoutMinutes(scope, 0);
-    log.info('command', 'timeout-off', { scope, targeted: parsed.targeted });
-    await reply(ctx, '✅ 已关闭当前 session 的探活。');
-    return;
-  }
-
-  const n = Number.parseInt(value, 10);
-  if (!Number.isFinite(n) || n < 1 || n > 120) {
-    await reply(ctx, '❌ 用法:`/timeout <1-120>` / `/timeout off` / `/timeout default`');
-    return;
-  }
-  ctx.sessions.setIdleTimeoutMinutes(scope, n);
-  log.info('command', 'timeout-set', { scope, minutes: n, targeted: parsed.targeted });
-  await reply(ctx, `✅ 当前 session 探活已设为 ${n} 分钟。`);
-}
-
-function parseTimeoutTarget(input: string, currentScope: string): {
-  scope: string;
-  value: string;
-  targeted: boolean;
-} {
-  const parts = input.split(/\s+/).filter(Boolean);
-  const first = parts[0] ?? '';
-  if (first.startsWith('comment:')) {
-    return {
-      scope: first,
-      value: parts.slice(1).join(' '),
-      targeted: true,
-    };
-  }
-  return {
-    scope: currentScope,
-    value: input,
-    targeted: false,
-  };
-}
-
-async function handlePs(_args: string, ctx: CommandContext): Promise<void> {
-  const live = readAndPrune();
-  log.info('command', 'ps', { count: live.length });
-  if (live.length === 0) {
-    await reply(ctx, '当前没有 bot 在运行(理论上不可能,你正在跟其中之一对话…)');
-    return;
-  }
-
-  const rows: string[] = [
-    '| # | ID | Bot | 启动 |',
-    '|---|---|---|---|',
-  ];
-  for (const [idx, e] of live.entries()) {
-    const ago = formatAgoCompact(Date.now() - new Date(e.startedAt).getTime());
-    const me = e.id === ctx.controls.processId ? ' ← 当前正在回复' : '';
-    const bot = e.botName ? `${e.botName} (\`${e.appId}\`)` : `\`${e.appId}\``;
-    rows.push(`| ${idx + 1} | \`${e.id}\`${me} | ${bot} | ${ago} |`);
-  }
-  const body = [
-    `🧭 **当前有 ${live.length} 个 bot 在运行**`,
-    '',
-    rows.join('\n'),
-    '',
-    '用 `/exit <id|#>` 关掉某一个;`/exit ' + ctx.controls.processId + '` 关掉正在回复你的这个 bot。',
-  ].join('\n');
-  await reply(ctx, body);
-}
-
-async function handleExit(args: string, ctx: CommandContext): Promise<void> {
-  const target = args.trim();
-  if (!target) {
-    await reply(
-      ctx,
-      '用法:`/exit <id|#>` —— `id` 是 `/ps` 显示的短 id,`#` 是序号。\n' +
-        `当前正在回复你的是 \`${ctx.controls.processId}\`。`,
-    );
-    return;
-  }
-  const entry = resolveTarget(target);
-  if (!entry) {
-    await reply(ctx, `❌ 没找到匹配的 bot:\`${target}\`。发 \`/ps\` 看可选目标。`);
-    return;
-  }
-
-  // Targeting ourselves — graceful disconnect + process.exit(0) via controls.
-  if (entry.id === ctx.controls.processId) {
-    log.info('command', 'exit-self', { id: entry.id });
-    await reply(ctx, `👋 即将关闭当前 bot \`${entry.id}\`,再见。`);
-    // Detach to give the reply send a chance to complete before we tear
-    // down. controls.exit() awaits disconnect then process.exit().
-    void (async () => {
-      await new Promise((r) => setTimeout(r, 300));
-      await ctx.controls.exit().catch(() => {});
-    })();
-    return;
-  }
-
-  // Targeting another process — SIGTERM and report back. We can't easily
-  // wait for it to die without blocking the command handler; trust the
-  // target's own signal handler to unregister + exit.
-  log.info('command', 'exit-other', { id: entry.id, pid: entry.pid });
-  try {
-    process.kill(entry.pid, 'SIGTERM');
-  } catch (err) {
-    await reply(ctx, `❌ 关掉 bot \`${entry.id}\` 失败:${(err as Error).message}`);
-    return;
-  }
-  // Brief grace before reporting.
-  await new Promise((r) => setTimeout(r, 500));
-  const stillAlive = isAlive(entry.pid);
-  if (stillAlive) {
-    await reply(
-      ctx,
-      `📨 已请求关闭 \`${entry.id}\`,但还在收尾。再发 \`/ps\` 复查一下。`,
-    );
-  } else {
-    await reply(ctx, `✓ 已关闭 bot \`${entry.id}\`。`);
-  }
-}
-
-async function handleReconnect(args: string, ctx: CommandContext): Promise<void> {
-  const wait = args.trim().split(/\s+/).filter(Boolean).includes('--wait');
-  log.info('command', 'reconnect', { wait });
-  await reply(ctx, wait ? '⏳ 将在当前运行结束后重连…' : '⏳ 正在停止当前运行并重连…');
-  let resumeNewRuns: (() => void) | undefined;
-  try {
-    resumeNewRuns = ctx.activeRuns.pauseNewRuns('reconnect-in-progress');
-    if (wait) {
-      await ctx.activeRuns.waitForAll();
-    } else {
-      await ctx.activeRuns.stopAll();
-    }
-    await ctx.controls.restart({ wait });
-    log.info('command', 'reconnect-ok');
-  } catch (err) {
-    log.fail('command', err, { step: 'reconnect' });
-    reportMetric('command_fail', 1, { step: 'reconnect' });
-    await reply(ctx, `❌ 重连失败:${err instanceof Error ? err.message : String(err)}`);
-  } finally {
-    resumeNewRuns?.();
   }
 }
 
@@ -1350,16 +937,6 @@ async function handleCoffee(_args: string, ctx: CommandContext): Promise<void> {
 
 // ─── git: /diff, /worktree, /pr ───────────────────────────────────────────
 
-/**
- * Git summary for the `/status` card. Silent when the cwd is not a repository
- * (or git is missing) — `/status` must stay useful for non-code workspaces.
- */
-async function gitStatusLine(cwd: string | undefined): Promise<{ git?: string }> {
-  if (!cwd) return {};
-  const status = await readRepoStatus(cwd).catch(() => undefined);
-  return status ? { git: describeRepoStatus(status) } : {};
-}
-
 /** Resolve the repo the current session points at, or reply why we cannot. */
 async function requireRepo(
   ctx: CommandContext,
@@ -1630,32 +1207,6 @@ async function handlePr(args: string, ctx: CommandContext): Promise<void> {
 
 function requireKnowledge(ctx: CommandContext): KnowledgeStore | undefined {
   return ctx.controls.knowledge;
-}
-
-/** Knowledge summary for the `/status` card; silent when the store is absent. */
-async function knowledgeStatusLine(ctx: CommandContext): Promise<{ knowledge?: string }> {
-  const store = ctx.controls.knowledge;
-  if (!store) return {};
-  try {
-    const [chat, profile, skills, repo] = await Promise.all([
-      store.listMemories({ kind: 'chat', scopeId: ctx.scope }),
-      store.listMemories({ kind: 'profile' }),
-      store.listSkills(),
-      knowledgeRepoStatus(store),
-    ]);
-    if (chat.length + profile.length + skills.length === 0 && !repo) return {};
-    const sync = repo?.upstream
-      ? `同步 ↑${repo.upstream.ahead} ↓${repo.upstream.behind}`
-      : repo
-        ? '未绑定远端'
-        : '未启用同步';
-    return {
-      knowledge: `记忆 ${chat.length}(本会话)/${profile.length}(全局) · skills ${skills.length} · ${sync}`,
-    };
-  } catch (err) {
-    log.warn('knowledge', 'status-line-failed', { err: String(err) });
-    return {};
-  }
 }
 
 async function handleMemory(args: string, ctx: CommandContext): Promise<void> {
