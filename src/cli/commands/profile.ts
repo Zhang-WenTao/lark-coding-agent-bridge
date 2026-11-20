@@ -1,4 +1,5 @@
 import { existsSync } from 'node:fs';
+import { log } from '../../core/logger';
 import { rm } from 'node:fs/promises';
 import { resolveAppPaths } from '../../config/app-paths';
 import { paths } from '../../config/paths';
@@ -216,7 +217,7 @@ export async function runProfileRemove(
       }
       console.log(`已归档 profile: ${name} -> ${result.archivedTo}`);
     } finally {
-      await lock.release().catch(() => {});
+      await lock.release().catch(log.swallow('cli', 'lock-release-failed'));
     }
   });
 }

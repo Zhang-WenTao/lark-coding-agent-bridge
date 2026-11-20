@@ -120,7 +120,7 @@ function getStream(): WriteStream | null {
   }
 }
 
-type Level = 'info' | 'warn' | 'error';
+type Level = 'debug' | 'info' | 'warn' | 'error';
 export type LogFields = Record<string, unknown>;
 
 /**
@@ -323,6 +323,16 @@ function emitUnsafe(level: Level, phase: string, event: string, fields: LogField
     } else {
       entry[k] = sanitizeLogValue(k, v, LOCAL_LOG_SANITIZE);
     }
+  }
+
+  // Debug lines only go to the JSON file: no telemetry, no stdout.
+  if (level === 'debug') {
+    try {
+      getStream()?.write(`${JSON.stringify(entry)}\n`);
+    } catch {
+      /* swallow disk errors — logging should never crash the bot */
+    }
+    return;
   }
 
   const externalEntry = sanitizeLogEntry(entry, EXTERNAL_SANITIZE);
@@ -531,6 +541,24 @@ function formatFields(fields: LogFields): string {
 }
 
 export const log = {
+  /**
+   * Low-value detail, written to the log file only (no stdout, no telemetry).
+   * For failures that are deliberately ignored, so they still leave a trace.
+   */
+  debug(phase: string, event: string, fields?: LogFields): void {
+    emit('debug', phase, event, fields);
+  },
+  /**
+   * A `.catch` handler for an error that is deliberately ignored: control flow
+   * stays the same, the error lands in the log file as a debug line.
+   * `promise.catch(log.swallow('dream', 'unlock-failed'))`
+   */
+  swallow(phase: string, event: string, fields?: LogFields): (err: unknown) => undefined {
+    return (err: unknown) => {
+      emit('debug', phase, event, { ...fields, err: err instanceof Error ? err.message : String(err) });
+      return undefined;
+    };
+  },
   info(phase: string, event: string, fields?: LogFields): void {
     emit('info', phase, event, fields);
   },

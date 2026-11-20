@@ -1,4 +1,5 @@
 import { mkdir } from 'node:fs/promises';
+import { log } from '../core/logger';
 import { join } from 'node:path';
 import { fullestQuotaWindow, quotaResetAt, readAgentQuota, type AccountLineCap, type QuotaReading } from '../agent/quota';
 import type { ProfileConfig } from '../config/profile-schema';
@@ -106,7 +107,7 @@ export async function runAutoCheck(host: AutoGateHost): Promise<DreamAutoCheck> 
       reason: `最近 ${settings.minIdleMinutes} 分钟内有对话，等空闲后再看`,
     });
   }
-  const url = await knowledgeRemoteUrl(deps.knowledge).catch(() => undefined);
+  const url = await knowledgeRemoteUrl(deps.knowledge).catch(log.swallow('dream', 'knowledge-remote-url-failed'));
   if (!url) return noteCheck(host, { at: now, block: 'no-remote', reason: '知识库没有绑定远端（/knowledge bind）' });
   if (!host.readOnlyAllowed()) {
     return noteCheck(host, { at: now, block: 'restricted', reason: '当前 agent 配置无法保证只读执行，不开放自动整理' });
@@ -231,7 +232,7 @@ export async function openDreamPrs(host: AutoGateHost, knowledgeUrl: string): Pr
   const runs = host.state.runs();
   let worst = 0;
   for (const repo of host.repoTargets(knowledgeUrl)) {
-    const live = await count(repo.url).catch(() => undefined);
+    const live = await count(repo.url).catch(log.swallow('dream', 'count-open-prs-failed'));
     // Drafts of ours still waiting to be pushed / opened are part of the
     // backlog too — and all there is to go on when `gh` cannot answer.
     const waiting = runs
@@ -254,7 +255,7 @@ export async function readQuota(deps: AutoGateDeps, window: 'any' | 'week' = 'an
         window,
       });
     });
-  const reading = await read().catch(() => undefined);
+  const reading = await read().catch(log.swallow('dream', 'quota-read-failed'));
   const chosen = !reading
     ? undefined
     : window === 'week' && !reading.blocked

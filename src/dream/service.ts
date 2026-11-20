@@ -468,7 +468,7 @@ export class DreamService {
     try {
       // Without a remote there is nowhere to put a draft, and reading the input
       // anyway would only consume it.
-      const url = await knowledgeRemoteUrl(this.deps.knowledge).catch(() => undefined);
+      const url = await knowledgeRemoteUrl(this.deps.knowledge).catch(log.swallow('dream', 'knowledge-remote-url-failed'));
       if (!url) {
         return { error: '知识库还没有绑定远端仓库，草稿无处提交。先用 `/knowledge bind <git 仓库地址>` 绑定。', code: 'no-remote' };
       }
@@ -515,7 +515,7 @@ export class DreamService {
         })
         .finally(async () => {
           unwatch();
-          await release().catch(() => undefined);
+          await release().catch(log.swallow('dream', 'lock-release-failed'));
           if (this.current === current) this.current = undefined;
           const final = this.state.run(id);
           if (!final) return;
@@ -540,7 +540,7 @@ export class DreamService {
       return { run: this.state.run(id)! };
     } finally {
       this.starting = false;
-      if (locks) await locks.release().catch(() => undefined);
+      if (locks) await locks.release().catch(log.swallow('dream', 'lock-release-failed'));
     }
   }
 
@@ -563,7 +563,7 @@ export class DreamService {
     log.info('dream', 'preempted', { batch: current.id, reason });
     // Not a cancel: what is done is kept, only the turn in flight and the rest give way.
     current.yielding = `${YIELD_REASON}（${reason}）`;
-    void current.execution?.stop().catch(() => undefined);
+    void current.execution?.stop().catch(log.swallow('dream', 'execution-stop-failed'));
     return true;
   }
 
@@ -647,7 +647,7 @@ export class DreamService {
     this.reverting = true;
     let locks: HeldDreamLocks | undefined;
     try {
-      const knowledgeUrl = await knowledgeRemoteUrl(this.deps.knowledge).catch(() => undefined);
+      const knowledgeUrl = await knowledgeRemoteUrl(this.deps.knowledge).catch(log.swallow('dream', 'knowledge-remote-url-failed'));
       const repos = this.repoTargets(knowledgeUrl);
       const held = await acquireDreamLocks(this.lockDir(), repos.map((item) => item.url), {
         profile: this.deps.profile,
@@ -662,7 +662,7 @@ export class DreamService {
       return { id: run.id, results };
     } finally {
       this.reverting = false;
-      await locks?.release().catch(() => undefined);
+      await locks?.release().catch(log.swallow('dream', 'lock-release-failed'));
     }
   }
 
@@ -744,7 +744,7 @@ export class DreamService {
 
   /** Some account is below `cap`; undefined when it cannot be told (one account, another agent). */
   private async accountHasRoom(cap: AccountLineCap): Promise<boolean | undefined> {
-    if (this.deps.accountRoom) return this.deps.accountRoom(cap).catch(() => undefined);
+    if (this.deps.accountRoom) return this.deps.accountRoom(cap).catch(log.swallow('dream', 'account-room-failed'));
     return accountRoomUnderCap(this.deps.profileConfig(), this.deps.profileDir, cap);
   }
 
@@ -763,7 +763,7 @@ export class DreamService {
     if (!current) return false;
     current.stopped ??= reason;
     current.abort.abort();
-    void current.execution?.stop().catch(() => undefined);
+    void current.execution?.stop().catch(log.swallow('dream', 'execution-stop-failed'));
     return true;
   }
 
@@ -1325,14 +1325,14 @@ export class DreamService {
     }
     if (this.current) this.current.execution = execution;
     // Stopped in the meantime (a user task, a cancel): the stop above found no execution yet.
-    if (signal.aborted || this.current?.yielding) void execution.stop().catch(() => undefined);
+    if (signal.aborted || this.current?.yielding) void execution.stop().catch(log.swallow('dream', 'execution-stop-failed'));
     let timedOut = false;
     const timer = setTimeout(() => {
       timedOut = true;
-      void execution.stop().catch(() => undefined);
+      void execution.stop().catch(log.swallow('dream', 'execution-stop-failed'));
     }, timeoutMs);
     timer.unref?.();
-    const onAbort = () => void execution.stop().catch(() => undefined);
+    const onAbort = () => void execution.stop().catch(log.swallow('dream', 'execution-stop-failed'));
     signal.addEventListener('abort', onAbort, { once: true });
     let finalText: string | undefined;
     let streamed = '';
@@ -1348,7 +1348,7 @@ export class DreamService {
       clearTimeout(timer);
       signal.removeEventListener('abort', onAbort);
       if (this.current) this.current.execution = undefined;
-      await this.deps.executor.closeIdleScope?.(scopeId).catch(() => undefined);
+      await this.deps.executor.closeIdleScope?.(scopeId).catch(log.swallow('dream', 'close-idle-scope-failed'));
     }
     if (timedOut) return { error: '超出本轮运行时间' };
     if (signal.aborted) return { error: '已取消' };
@@ -1520,7 +1520,7 @@ export class DreamService {
           // One review at a time: while the last rewrite PR is open, today's rewrites are proposed again later.
           const open = await (this.deps.countOpenPrs ?? ((url: string) => countOpenDreamPullRequests(this.deps.workDir, url)))(
             group.library.url,
-          ).catch(() => undefined);
+          ).catch(log.swallow('dream', 'count-open-prs-failed'));
           if (open !== undefined && open >= settings.auto.maxOpenPrs) {
             this.saveTarget(id, {
               ...target,
@@ -1660,7 +1660,7 @@ export class DreamService {
     const done = this.saveTarget(id, { ...target, phase: 'published', commit: pushed.commit, error: undefined });
     log.info('dream', 'pushed-direct', { batch: id, repo: target.repo });
     const repo = baseRepo(target.repo);
-    const url = this.repoTargets(await knowledgeRemoteUrl(this.deps.knowledge).catch(() => undefined)).find(
+    const url = this.repoTargets(await knowledgeRemoteUrl(this.deps.knowledge).catch(log.swallow('dream', 'knowledge-remote-url-failed'))).find(
       (item) => item.repo === repo,
     )?.url;
     for (const raw of url ? resolveDreamSettings(this.deps.appConfig().preferences?.dreamTuning).localClones : []) {
@@ -1805,13 +1805,13 @@ export class DreamService {
     }
     for (const name of names) {
       if (keep.has(name)) continue;
-      await rm(join(root, name), { recursive: true, force: true }).catch(() => undefined);
+      await rm(join(root, name), { recursive: true, force: true }).catch(log.swallow('dream', 'cleanup-failed'));
       const run = runs.find((item) => item.id === name);
       for (const target of run?.targets ?? []) {
         if (target.checkoutDir) this.state.saveTarget(name, { ...target, checkoutDir: undefined });
       }
     }
-    await rm(join(this.deps.workDir, 'reverts'), { recursive: true, force: true }).catch(() => undefined);
+    await rm(join(this.deps.workDir, 'reverts'), { recursive: true, force: true }).catch(log.swallow('dream', 'cleanup-failed'));
   }
 }
 
@@ -1846,7 +1846,7 @@ export async function composeDreamStatus(input: {
   const running =
     input.running ?? [...runs].reverse().find((run) => run.status === 'queued' || run.status === 'running');
   const settings = resolveDreamSettings(input.appConfig.preferences?.dreamTuning);
-  const url = await knowledgeRemoteUrl(input.knowledge).catch(() => undefined);
+  const url = await knowledgeRemoteUrl(input.knowledge).catch(log.swallow('dream', 'knowledge-remote-url-failed'));
   const library = defaultSkillLibrary(input.profileConfig.skills?.libraries ?? [], settings.skillLibrary);
   return {
     enabled: getDream(input.appConfig) !== undefined,

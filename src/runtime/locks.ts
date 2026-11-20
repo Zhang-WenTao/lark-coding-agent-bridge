@@ -1,4 +1,5 @@
 import { chmod, mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
+import { log } from '../core/logger';
 import { dirname } from 'node:path';
 import * as lockfile from 'proper-lockfile';
 import { isAgentKind } from '../agent/registry';
@@ -64,7 +65,7 @@ export async function withProfileAndAppLocks<T>(
     return await fn([...acquired]);
   } finally {
     for (const lock of acquired.reverse()) {
-      await lock.release().catch(() => {});
+      await lock.release().catch(log.swallow('runtime', 'lock-release-failed'));
     }
   }
 }

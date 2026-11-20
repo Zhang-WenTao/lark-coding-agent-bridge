@@ -242,7 +242,7 @@ function parkWithShutdown(
       await removeUiSidecar(appPaths.hostUiFile);
     }
     await supervisor.shutdown();
-    if (hostLock) await hostLock.release().catch(() => {});
+    if (hostLock) await hostLock.release().catch(log.swallow('cli', 'lock-release-failed'));
     await flushTelemetry();
     process.exit(0);
   };

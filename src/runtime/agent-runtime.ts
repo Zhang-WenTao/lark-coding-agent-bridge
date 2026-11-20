@@ -1,4 +1,5 @@
 import { claudeAccountPool } from '../agent/claude/accounts';
+import { log } from '../core/logger';
 import { ClaudeAdapter } from '../agent/claude/adapter';
 import { CodexAdapter } from '../agent/codex/adapter';
 import type { LarkChannelEnvContext } from '../agent/lark-channel-env';
@@ -99,6 +100,6 @@ export function assertReconnectAgentKindUnchanged(
 /** Release a set of runtime locks, swallowing individual failures. */
 export async function releaseRuntimeLocks(locks: AcquiredRuntimeLock[]): Promise<void> {
   for (const lock of locks) {
-    await lock.release().catch(() => undefined);
+    await lock.release().catch(log.swallow('runtime', 'lock-release-failed'));
   }
 }

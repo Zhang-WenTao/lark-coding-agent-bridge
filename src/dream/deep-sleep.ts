@@ -77,7 +77,7 @@ export async function deepSleep(
   diary: DiaryInput,
 ): Promise<string | undefined> {
   const { signal } = ctx;
-  const url = await knowledgeRemoteUrl(host.deps.knowledge).catch(() => undefined);
+  const url = await knowledgeRemoteUrl(host.deps.knowledge).catch(log.swallow('dream', 'knowledge-remote-url-failed'));
   const notes: string[] = [];
   const done = () => {
     host.state.updateRun(id, { diary: diaryEntry(diary) });

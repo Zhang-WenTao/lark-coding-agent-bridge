@@ -1152,7 +1152,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       controls.usage = undefined;
       controls.approvals = undefined;
       controls.audit = undefined;
-      await approvalSocket?.close().catch(() => undefined);
+      await approvalSocket?.close().catch(log.swallow('bridge', 'approval-socket-close-failed'));
       // Keep the durable copy: the next process (or the rebuilt channel after
       // /reconnect) picks the queued messages up again.
       pending.stop();

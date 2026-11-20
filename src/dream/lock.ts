@@ -64,8 +64,8 @@ export async function acquireDreamLocks(
   const held: Array<{ file: string; release: () => Promise<void> }> = [];
   const releaseAll = async () => {
     for (const lock of held.splice(0).reverse()) {
-      await unlink(`${lock.file}.holder.json`).catch(() => undefined);
-      await lock.release().catch(() => undefined);
+      await unlink(`${lock.file}.holder.json`).catch(log.swallow('dream', 'lock-holder-unlink-failed'));
+      await lock.release().catch(log.swallow('dream', 'lock-release-failed'));
     }
   };
   for (const id of ids) {
@@ -92,7 +92,7 @@ export async function acquireDreamLocks(
     }
     held.push({ file, release });
     const meta: DreamLockHolder = { ...holder, pid: process.pid, since: Date.now() };
-    await writeFileAtomic(`${file}.holder.json`, `${JSON.stringify(meta)}\n`, { mode: 0o600 }).catch(() => undefined);
+    await writeFileAtomic(`${file}.holder.json`, `${JSON.stringify(meta)}\n`, { mode: 0o600 }).catch(log.swallow('dream', 'lock-holder-write-failed'));
   }
   return { release: releaseAll };
 }

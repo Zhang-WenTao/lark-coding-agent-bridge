@@ -254,14 +254,14 @@ class ManagedProfile {
         const oldAppLock = this.locks.find((l) => l.kind === 'app');
         this.locks = [...this.locks.filter((l) => l.kind !== 'app'), nextAppLock];
         nextAppLock = undefined;
-        await oldAppLock?.release().catch(() => undefined);
+        await oldAppLock?.release().catch(log.swallow('app', 'lock-release-failed'));
       }
       this.cfg = next;
       this.profileConfig = nextRuntime.profileConfig;
       this.agent = nextAgent;
       this.controls = nextControls;
     } finally {
-      if (nextAppLock) await nextAppLock.release().catch(() => undefined);
+      if (nextAppLock) await nextAppLock.release().catch(log.swallow('app', 'lock-release-failed'));
       this.restarting = false;
     }
   }

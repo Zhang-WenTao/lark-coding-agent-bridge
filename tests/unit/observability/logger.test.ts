@@ -48,6 +48,33 @@ describe('profile logger observability', () => {
     expect(JSON.parse(text.trim()).ts).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}[+-]\d{2}:\d{2}$/);
   });
 
+  it('writes debug lines and swallowed errors to the file only', async () => {
+    const tmp = await createTmpProfile('logger-debug-');
+    cleanups.push(tmp.cleanup);
+    const logsDir = join(tmp.profile, 'logs');
+    const out = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    configureLogger({ logsDir, now: () => new Date('2026-05-25T12:34:56.000Z') });
+
+    log.debug('dream', 'detail', { n: 1 });
+    const value = await Promise.reject(new Error('lock gone')).catch(log.swallow('dream', 'lock-release-failed'));
+    await flushLogger();
+
+    expect(value).toBeUndefined();
+    const lines = (await readFile(join(logsDir, 'bridge-20260525.jsonl'), 'utf8')).trim().split('\n').map((l) => JSON.parse(l));
+    expect(lines).toMatchObject([
+      { level: 'debug', phase: 'dream', event: 'detail', n: 1 },
+      { level: 'debug', phase: 'dream', event: 'lock-release-failed', err: 'lock gone' },
+    ]);
+    expect(out).not.toHaveBeenCalled();
+    expect(warn).not.toHaveBeenCalled();
+    expect(error).not.toHaveBeenCalled();
+    out.mockRestore();
+    warn.mockRestore();
+    error.mockRestore();
+  });
+
   it('prints topic scope, message id, run, COT, outbound, and fallback context on stdout', () => {
     const out = vi.spyOn(console, 'log').mockImplementation(() => {});
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
