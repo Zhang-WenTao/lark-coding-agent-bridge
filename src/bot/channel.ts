@@ -522,8 +522,10 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
   await modelPins.load();
   controls.modelPins = modelPins;
   // 复制代码: finished cards' copy buttons carry a key into this store.
-  if (deps.appPaths?.mediaDir) {
-    const codeSnippets = new CodeSnippetStore(join(dirname(deps.appPaths.mediaDir), 'code-snippets.json'));
+  const codeSnippets = deps.appPaths?.mediaDir
+    ? new CodeSnippetStore(join(dirname(deps.appPaths.mediaDir), 'code-snippets.json'))
+    : undefined;
+  if (codeSnippets) {
     await codeSnippets.load();
     controls.codeSnippets = codeSnippets;
   }
@@ -1174,18 +1176,28 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
         );
         await runs.flush();
       }
+      // Every store with a write chain. The position is the `flush-<n>` step
+      // in the log: append new stores at the end so existing numbers keep
+      // their meaning.
+      const stores: ReadonlyArray<{ flush(): Promise<unknown> } | undefined> = [
+        sessions,
+        sessionCatalog,
+        callbackNonceStore,
+        workspaces,
+        jobs,
+        pendingStore,
+        pendingRotations,
+        contextCursors,
+        usageLedger,
+        auditLog,
+        modelPins,
+        autoEfforts,
+        codeSnippets,
+        noteExposure,
+      ];
       const [disconnectResult, ...flushResults] = await Promise.allSettled([
         channel.disconnect(),
-        sessions.flush(),
-        sessionCatalog?.flush(),
-        callbackNonceStore?.flush(),
-        workspaces.flush(),
-        jobs?.flush(),
-        pendingStore?.flush(),
-        pendingRotations.flush(),
-        contextCursors.flush(),
-        usageLedger?.flush(),
-        auditLog?.flush(),
+        ...stores.map((s) => s?.flush()),
       ]);
       for (const [idx, result] of flushResults.entries()) {
         if (result.status === 'rejected') {
