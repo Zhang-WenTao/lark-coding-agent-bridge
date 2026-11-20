@@ -9,11 +9,10 @@
  *
  * Only keys and counts are stored — never what was read, asked or answered.
  */
-import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import type { AgentTranscript } from '../agent/transcript-builder';
 import { log } from '../core/logger';
-import { writeFileAtomic } from '../platform/atomic-write';
+import { JsonFile } from '../platform/json-file';
 import { expandHome } from '../platform/paths';
 import { exchangeHash } from './select';
 import type { DreamSessionRecord } from './state';
@@ -99,35 +98,35 @@ export function localDay(at: number, timezone: string): string {
 
 export class RecallStore {
   private data: RecallData = { version: 1, cursors: {}, items: {} };
-  private saving: Promise<void> = Promise.resolve();
+  private readonly file: JsonFile;
 
-  constructor(private readonly path: string) {}
+  constructor(path: string) {
+    this.file = new JsonFile(path, {
+      mode: 0o600,
+      onLoadError: (err, movedTo) => {
+        // An unreadable file was always ignored silently; only bad JSON is logged.
+        if (err instanceof SyntaxError) log.warn('dream', 'recall-load-failed', { err: String(err), ...(movedTo ? { movedTo } : {}) });
+      },
+      onPersistError: (err) => log.fail('dream', err, { step: 'recall-persist' }),
+    });
+  }
 
   async load(): Promise<void> {
-    let text: string;
-    try {
-      text = await readFile(this.path, 'utf8');
-    } catch {
-      return;
-    }
-    try {
-      const parsed = JSON.parse(text) as Partial<RecallData>;
-      if (parsed && parsed.version === 1) {
-        this.data = {
-          version: 1,
-          ...(typeof parsed.since === 'number' ? { since: parsed.since } : {}),
-          cursors: parsed.cursors ?? {},
-          items: parsed.items ?? {},
-          ...(parsed.seen && typeof parsed.seen === 'object' ? { seen: validSeen(parsed.seen) } : {}),
-        };
-      }
-    } catch (err) {
-      log.warn('dream', 'recall-load-failed', { err: String(err) });
+    const parsed = (await this.file.load()) as Partial<RecallData> | undefined;
+    if (!parsed || typeof parsed !== 'object') return;
+    if (parsed.version === 1) {
+      this.data = {
+        version: 1,
+        ...(typeof parsed.since === 'number' ? { since: parsed.since } : {}),
+        cursors: parsed.cursors ?? {},
+        items: parsed.items ?? {},
+        ...(parsed.seen && typeof parsed.seen === 'object' ? { seen: validSeen(parsed.seen) } : {}),
+      };
     }
   }
 
   async flush(): Promise<void> {
-    await this.saving;
+    await this.file.flush();
   }
 
   /** The earliest time the counts cover; undefined before the first scan. */
@@ -297,10 +296,7 @@ export class RecallStore {
   }
 
   protected persist(): void {
-    const snapshot = `${JSON.stringify(this.data)}\n`;
-    this.saving = this.saving
-      .then(() => writeFileAtomic(this.path, snapshot, { mode: 0o600 }))
-      .catch((err: unknown) => log.fail('dream', err, { step: 'recall-persist' }));
+    this.file.write(`${JSON.stringify(this.data)}\n`);
   }
 }
 

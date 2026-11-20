@@ -9,6 +9,10 @@ import { JobStore } from '../../../src/scheduler/store.js';
 import { AutoResumer } from '../../../src/bot/auto-resume.js';
 import { ChatContextCursorStore } from '../../../src/bot/chat-context.js';
 import { RunRegistry } from '../../../src/runtime/run-registry.js';
+import { AutoEffortStore } from '../../../src/agent/auto-effort.js';
+import { DreamStateStore } from '../../../src/dream/state.js';
+import { CandidatePool } from '../../../src/dream/pool.js';
+import { RecallStore } from '../../../src/dream/recall.js';
 import { UsageLedger } from '../../../src/runtime/usage-ledger.js';
 
 // Stores on JsonFile: a file that is not JSON is moved aside at load (the
@@ -73,6 +77,26 @@ describe('JSON state stores keep a corrupt file instead of overwriting it', () =
         },
       };
     }],
+    ['auto-effort', (p) => {
+      const s = new AutoEffortStore(p);
+      return {
+        load: () => s.load(),
+        flush: () => s.flush(),
+        touchSave: () => s.set('scope', { handle: 'h', level: 'low' } as never),
+      };
+    }],
+    ['dream-state', (p) => {
+      const s = new DreamStateStore(p);
+      return { load: () => s.load(), flush: () => s.flush(), touchSave: () => s.updateAuto({ consecutiveFailures: 1 }) };
+    }],
+    ['dream-pool', (p) => {
+      const s = new CandidatePool(p);
+      return { load: () => s.load(), flush: () => s.flush(), touchSave: () => s.replace([]) };
+    }],
+    ['dream-recall', (p) => {
+      const s = new RecallStore(p);
+      return { load: () => s.load(), flush: () => s.flush(), touchSave: () => (s as unknown as { persist(): void }).persist() };
+    }],
   ];
 
   for (const [name, make] of cases) {
@@ -99,5 +123,15 @@ describe('JSON state stores keep a corrupt file instead of overwriting it', () =
     // A directory where the file should be: readFile fails with EISDIR, which must not be swallowed.
     const s = new AutoResumer({ file: dir, fire: async () => {} });
     await expect(s.load()).rejects.toThrow();
+  });
+
+  it('dream-state rejects on an unreadable file, and a read-only viewer leaves a corrupt file in place', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'json-store-'));
+    dirs.push(dir);
+    await expect(new DreamStateStore(dir).load()).rejects.toThrow();
+    const path = join(dir, 'state.json');
+    await writeFile(path, '{not json');
+    await new DreamStateStore(path).load(Date.now(), { readOnly: true });
+    expect(await readdir(dir)).toEqual(['state.json']);
   });
 });

@@ -1,6 +1,6 @@
-import { mkdir, readFile } from 'node:fs/promises';
+import { mkdir } from 'node:fs/promises';
 import { log } from '../core/logger';
-import { writeFileAtomic } from '../platform/atomic-write';
+import { JsonFile } from '../platform/json-file';
 import { mergeProcessEnv, spawnProcess } from '../platform/spawn';
 import type { AgentKind } from '../config/profile-schema';
 import { FABLE_WINDOW } from './claude/accounts';
@@ -340,23 +340,31 @@ function isScopeState(x: unknown): x is AutoEffortScopeState {
  */
 export class AutoEffortStore {
   private data: StateMap = {};
-  private saving: Promise<void> = Promise.resolve();
+  private readonly file: JsonFile;
   private readonly blocked = new Map<string, number>();
 
-  constructor(private readonly path?: string) {}
+  constructor(path?: string) {
+    this.file = new JsonFile(path, {
+      mode: 0o600,
+      onLoadError: (err, movedTo) => {
+        log.warn('auto-effort', 'load-failed', { err: String(err), ...(movedTo ? { movedTo } : {}) });
+        this.data = {};
+      },
+      onPersistError: (err) => log.warn('auto-effort', 'persist-failed', { err: String(err) }),
+    });
+  }
 
   async load(now: number = Date.now()): Promise<void> {
-    if (!this.path) return;
-    try {
-      const raw = JSON.parse(await readFile(this.path, 'utf8')) as Record<string, unknown>;
+    const raw = await this.file.load();
+    if (raw === undefined) return;
+    if (!raw || typeof raw !== 'object') {
+      log.warn('auto-effort', 'load-failed', { err: 'not an object' });
       this.data = {};
-      for (const [scope, entry] of Object.entries(raw)) {
-        if (isScopeState(entry) && now - entry.updatedAt < MAX_AGE_MS) this.data[scope] = entry;
-      }
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
-      log.warn('auto-effort', 'load-failed', { err: String(err) });
-      this.data = {};
+      return;
+    }
+    this.data = {};
+    for (const [scope, entry] of Object.entries(raw)) {
+      if (isScopeState(entry) && now - entry.updatedAt < MAX_AGE_MS) this.data[scope] = entry;
     }
   }
 
@@ -389,16 +397,11 @@ export class AutoEffortStore {
   }
 
   async flush(): Promise<void> {
-    await this.saving;
+    await this.file.flush();
   }
 
   private schedulePersist(): void {
-    if (!this.path) return;
-    const path = this.path;
-    const snapshot = JSON.stringify(this.data);
-    this.saving = this.saving
-      .then(() => writeFileAtomic(path, snapshot, { mode: 0o600 }))
-      .catch((err) => log.warn('auto-effort', 'persist-failed', { err: String(err) }));
+    this.file.write(JSON.stringify(this.data));
   }
 }
 

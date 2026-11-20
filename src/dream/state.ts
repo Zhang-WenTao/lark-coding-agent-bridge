@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { isAgentKind, type AgentKind } from '../agent/registry';
 import { log } from '../core/logger';
-import { writeFileAtomic } from '../platform/atomic-write';
+import { JsonFile } from '../platform/json-file';
 import type { ExternalCursor } from './external';
 import type { DreamAutoCheck, DreamAutoLedger } from './schedule';
 
@@ -126,11 +126,20 @@ const MAX_PUBLISHED = 5000;
 
 export class DreamStateStore {
   private data: DreamStateData = { version: 1, sessions: {}, runs: [], published: [] };
-  private saving: Promise<void> = Promise.resolve();
+  private readonly file: JsonFile;
   private readonly path: string;
 
   constructor(path: string) {
     this.path = path;
+    this.file = new JsonFile(path, {
+      mode: 0o600,
+      onLoadError: (err, movedTo) => {
+        // An unreadable file still aborts the load; only unparseable content is tolerated.
+        if (!(err instanceof SyntaxError)) throw err;
+        log.warn('dream', 'state-parse-failed', { err: String(err), ...(movedTo ? { movedTo } : {}) });
+      },
+      onPersistError: (err) => log.fail('dream', err, { step: 'persist' }),
+    });
   }
 
   /**
@@ -144,20 +153,15 @@ export class DreamStateStore {
    * is written back.
    */
   async load(now = Date.now(), options: { readOnly?: boolean } = {}): Promise<void> {
-    let text: string;
-    try {
-      text = await readFile(this.path, 'utf8');
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
-      throw err;
-    }
-    let parsed: Partial<DreamStateData>;
-    try {
-      parsed = JSON.parse(text) as Partial<DreamStateData>;
-    } catch (err) {
-      log.warn('dream', 'state-parse-failed', { err: String(err) });
+    // A read-only viewer must not touch the daemon's file, so it reads without
+    // JsonFile's move-aside of an unparseable file.
+    const loaded = options.readOnly ? await this.readUntouched() : await this.file.load();
+    if (loaded === undefined) return;
+    if (!loaded || typeof loaded !== 'object') {
+      log.warn('dream', 'state-parse-failed', { err: 'not an object' });
       return;
     }
+    const parsed = loaded as Partial<DreamStateData>;
     const sessions: Record<string, DreamSessionRecord> = {};
     for (const [key, raw] of Object.entries(parsed.sessions ?? {})) {
       const record = normalizeSession(key, raw);
@@ -350,7 +354,24 @@ export class DreamStateStore {
   }
 
   async flush(): Promise<void> {
-    await this.saving;
+    await this.file.flush();
+  }
+
+  /** Parsed file for the read-only viewer: same outcomes as before, nothing renamed. */
+  private async readUntouched(): Promise<unknown> {
+    let text: string;
+    try {
+      text = await readFile(this.path, 'utf8');
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+      throw err;
+    }
+    try {
+      return JSON.parse(text) as unknown;
+    } catch (err) {
+      log.warn('dream', 'state-parse-failed', { err: String(err) });
+      return undefined;
+    }
   }
 
   /** Over the cap, drop the conversations read longest ago. */
@@ -364,13 +385,7 @@ export class DreamStateStore {
   }
 
   private schedulePersist(): void {
-    this.saving = this.saving
-      .then(async () => {
-        await writeFileAtomic(this.path, `${JSON.stringify(this.data, null, 2)}\n`, { mode: 0o600 });
-      })
-      .catch((err: unknown) => {
-        log.fail('dream', err, { step: 'persist' });
-      });
+    this.file.write(`${JSON.stringify(this.data, null, 2)}\n`);
   }
 }
 

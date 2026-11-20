@@ -11,10 +11,9 @@
  * service saves the result only once the run's checkpoint is written — a
  * dropped batch reads its input again and must not have counted it already.
  */
-import { readFile } from 'node:fs/promises';
 import { log } from '../core/logger';
 import { sanitizeScopeId } from '../knowledge/store';
-import { writeFileAtomic } from '../platform/atomic-write';
+import { JsonFile } from '../platform/json-file';
 import type { DreamSourceRef } from './prompt';
 import { normalizeText, type MemoryAddition } from './proposal';
 import { localDay } from './recall';
@@ -261,23 +260,23 @@ export function candidateOf(
 
 export class CandidatePool {
   private data: PoolEntry[] = [];
-  private saving: Promise<void> = Promise.resolve();
+  private readonly file: JsonFile;
 
-  constructor(private readonly path: string) {}
+  constructor(path: string) {
+    this.file = new JsonFile(path, {
+      mode: 0o600,
+      onLoadError: (err, movedTo) => {
+        // An unreadable file was always ignored silently; only bad JSON is logged.
+        if (err instanceof SyntaxError) log.warn('dream', 'pool-load-failed', { err: String(err), ...(movedTo ? { movedTo } : {}) });
+      },
+      onPersistError: (err) => log.fail('dream', err, { step: 'pool-persist' }),
+    });
+  }
 
   async load(): Promise<void> {
-    let text: string;
-    try {
-      text = await readFile(this.path, 'utf8');
-    } catch {
-      return;
-    }
-    try {
-      const parsed = JSON.parse(text) as { version?: number; entries?: PoolEntry[] };
-      if (parsed?.version === 1 && Array.isArray(parsed.entries)) this.data = parsed.entries;
-    } catch (err) {
-      log.warn('dream', 'pool-load-failed', { err: String(err) });
-    }
+    const parsed = (await this.file.load()) as { version?: number; entries?: PoolEntry[] } | undefined;
+    if (!parsed || typeof parsed !== 'object') return;
+    if (parsed.version === 1 && Array.isArray(parsed.entries)) this.data = parsed.entries;
   }
 
   entries(): readonly PoolEntry[] {
@@ -287,14 +286,11 @@ export class CandidatePool {
   /** Keep tonight's plan: only after the run's checkpoint. */
   replace(entries: readonly PoolEntry[]): void {
     this.data = entries.map(cloneEntry);
-    const snapshot = `${JSON.stringify({ version: 1, entries: this.data })}\n`;
-    this.saving = this.saving
-      .then(() => writeFileAtomic(this.path, snapshot, { mode: 0o600 }))
-      .catch((err: unknown) => log.fail('dream', err, { step: 'pool-persist' }));
+    this.file.write(`${JSON.stringify({ version: 1, entries: this.data })}\n`);
   }
 
   async flush(): Promise<void> {
-    await this.saving;
+    await this.file.flush();
   }
 }
 
