@@ -103,7 +103,9 @@ async function preparedRun(adapter: CodexAdapter, opts: AgentRunOptions): Promis
   return adapter.run(opts);
 }
 
-describe('Codex app-server transport', () => {
+// Each case spawns real node processes; under the full parallel suite a
+// spawn can take seconds, so the 5 s default flakes (seen 11-20).
+describe('Codex app-server transport', { timeout: 30_000 }, () => {
   it.each([undefined, 'thr-old'])('forwards smart-session compaction to app-server (%s)', async (threadId) => {
     const fake = await createFakeAppServer();
     const cwd = await realpath(fake.dir);
