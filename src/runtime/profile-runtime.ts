@@ -5,19 +5,12 @@ import { runRegistrationWizard } from '../bot/wizard';
 import { detectInstalledAgents, type DetectedAgent } from '../cli/agent-detection';
 import { agentDescriptor, DEFAULT_AGENT_KIND, isAgentKind, listAgentDescriptors } from '../agent/registry';
 import {
-  createBootstrapCodexConfig,
   createBootstrapProfileConfig,
   resolveBootstrapWorkspace,
 } from '../cli/profile-bootstrap';
 import { promptPassword } from '../cli/prompt';
 import { setSecret } from '../config/keystore';
 import { resolveAppPaths, type AppPaths } from '../config/app-paths';
-import {
-  ActiveBridgeMigrationConflictError,
-  collectLegacyDefaultWorkspace,
-  migrateV1ToV2,
-  type MigrateV2Options,
-} from '../config/migrate-v2';
 import {
   agentKindFromString,
   createRootConfig,
@@ -63,9 +56,6 @@ export interface ResolveProfileRuntimeOptions {
   tenant?: string;
   allowBootstrap?: boolean;
   selectAgent?: (detected: DetectedAgent[]) => AgentKind | undefined | Promise<AgentKind | undefined>;
-  handleActiveBridgeMigrationConflict?: (
-    err: ActiveBridgeMigrationConflictError,
-  ) => boolean | Promise<boolean>;
 }
 
 export interface ProfileRuntime {
@@ -130,18 +120,12 @@ export async function resolveProfileRuntime(
   let appPaths = resolveAppPaths({ rootDir, profile });
   const configPath = opts.config ?? appPaths.configFile;
 
-  const migrationAgent = resolveBootstrapAgent(requestedAgent, profile);
-  const needsMigration = await hasLegacyConfig(configPath);
-  await migrateV1ToV2WithActiveBridgeHandling({
-    rootDir: appPaths.rootDir,
-    profile: appPaths.profile,
-    configFile: configPath,
-    workspace: opts.workspace,
-    ...(migrationAgent ? { agentKind: migrationAgent } : {}),
-    ...(needsMigration && migrationAgent === 'codex'
-      ? { codex: await createBootstrapCodexConfig(undefined) }
-      : {}),
-  }, opts.handleActiveBridgeMigrationConflict);
+  if (await hasLegacyConfig(configPath)) {
+    throw new Error(
+      `${configPath} is a pre-profile (v1) config, which this version no longer migrates. ` +
+        'Migrate it with an older lark-channel-bridge release first, or move it aside and run setup again.',
+    );
+  }
 
   let rootConfig = await loadRootConfig(configPath);
   if (rootConfig) {
@@ -387,8 +371,6 @@ async function resolveConvertedLegacyDefaultWorkspace(
   appPaths: AppPaths,
 ): Promise<string> {
   if (opts.workspace) return resolveBootstrapWorkspace(opts.workspace);
-  const legacyDefault = await collectLegacyDefaultWorkspace(appPaths.rootDir);
-  if (legacyDefault) return legacyDefault;
   await mkdir(appPaths.defaultWorkspaceDir, { recursive: true, mode: 0o700 });
   return realpath(appPaths.defaultWorkspaceDir);
 }
@@ -410,22 +392,6 @@ async function hasLegacyConfig(configPath: string): Promise<boolean> {
   }
   const parsed = JSON.parse(raw) as { schemaVersion?: unknown };
   return parsed.schemaVersion !== 2;
-}
-
-async function migrateV1ToV2WithActiveBridgeHandling(
-  options: MigrateV2Options,
-  handler: ResolveProfileRuntimeOptions['handleActiveBridgeMigrationConflict'],
-): Promise<void> {
-  for (;;) {
-    try {
-      await migrateV1ToV2(options);
-      return;
-    } catch (err) {
-      if (!(err instanceof ActiveBridgeMigrationConflictError) || !handler) throw err;
-      const shouldRetry = await handler(err);
-      if (!shouldRetry) throw err;
-    }
-  }
 }
 
 async function resolveBootstrapAppConfig(opts: ResolveProfileRuntimeOptions): Promise<AppConfig> {

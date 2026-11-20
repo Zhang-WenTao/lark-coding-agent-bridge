@@ -131,7 +131,7 @@ export async function saveSkillsConfig(
 ): Promise<SkillsConfig> {
   return withConfigFileLock(state.configPath, async () => {
     const root = await loadRootConfig(state.configPath);
-    if (!root) throw new Error('当前配置文件是旧版单 profile 结构，先运行 `lark-channel-bridge migrate` 再配置 skill 库。');
+    if (!root) throw new Error('当前配置文件是旧版单 profile 结构，本版本已不再迁移，请先用旧版本迁移或重新 setup，再配置 skill 库。');
     const profile = root.profiles[state.profile];
     if (!profile) throw new Error(`profile not found: ${state.profile}`);
     const skills = mutate(profile.skills ?? { libraries: [] });
@@ -155,7 +155,7 @@ export async function saveKnowledgeConfig(
 ): Promise<KnowledgeConfig> {
   return withConfigFileLock(state.configPath, async () => {
     const root = await loadRootConfig(state.configPath);
-    if (!root) throw new Error('当前配置文件是旧版单 profile 结构，先运行 `lark-channel-bridge migrate` 再配置知识库。');
+    if (!root) throw new Error('当前配置文件是旧版单 profile 结构，本版本已不再迁移，请先用旧版本迁移或重新 setup，再配置知识库。');
     const profile = root.profiles[state.profile];
     if (!profile) throw new Error(`profile not found: ${state.profile}`);
     const knowledge = mutate(profile.knowledge ?? {});

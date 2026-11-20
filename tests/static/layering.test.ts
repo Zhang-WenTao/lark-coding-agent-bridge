@@ -92,7 +92,6 @@ const KNOWN_UPWARD: string[] = [
   'src/commands/index.ts -> src/bot/wizard.ts',
   'src/commands/index.ts -> src/ui/sidecar.ts',
   'src/config/config-ops.ts -> src/lark-cli/identity-policy.ts',
-  'src/config/migrate-v2.ts -> src/agent/registry.ts',
   'src/config/profile-schema.ts -> src/agent/registry.ts',
   'src/config/profile-store.ts -> src/agent/registry.ts',
   'src/knowledge/exposure.ts -> src/runtime/usage-ledger.ts',

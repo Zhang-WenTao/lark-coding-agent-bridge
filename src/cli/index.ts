@@ -15,7 +15,6 @@ import {
   runClaudeAccountSet,
   runClaudeAccountSwitch,
 } from './commands/claude-account';
-import { runMigrate } from './commands/migrate';
 import { runKillCli, runPs } from './commands/ps';
 import {
   runSecretsGet,
@@ -84,16 +83,6 @@ program
   .option('--json', 'print one JSON snapshot')
   .option('--no-color', 'disable colors')
   .action(runMonitor);
-
-program
-  .command('migrate')
-  .description('Migrate legacy bridge config/state into the current profile layout')
-  .option('-c, --config <path>', 'path to config file')
-  .option('--profile <name>', 'target profile name for legacy v1 config migration')
-  .option('--agent <kind>', 'agent kind for legacy v1 profile migration (claude or codex)')
-  .action(async (opts: { config?: string; profile?: string; agent?: string }) => {
-    await runMigrate(opts);
-  });
 
 const profile = program
   .command('profile')
