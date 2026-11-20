@@ -1,13 +1,4 @@
 import { basename } from 'node:path';
-import { agentAccountsReport, agentAccountsTable, switchAgentAccount } from '../agent/account';
-import { agentCapability } from '../agent/capability';
-import { agentDescriptor } from '../agent/registry';
-import {
-  emptyTotals,
-  formatTokens,
-  type UsageReportRow,
-  type UsageTotals,
-} from '../runtime/usage-ledger';
 import { toolLabel } from '../card/approval-cards';
 import {
   DEFAULT_MODEL,
@@ -55,14 +46,12 @@ import {
   coffeeCard,
   cronCard,
   diffCard,
-  helpCard,
   knowledgeCard,
   type KnowledgeStatusView,
   memoryCard,
   pullRequestCard,
   skillLibrariesCard,
   skillsCard,
-  usageCard,
   worktreeCard,
 } from '../card/templates';
 import {
@@ -98,7 +87,6 @@ import type {
   TenantBrand,
 } from '../config/schema';
 import {
-  getAgentStopGraceMs,
   getCotMessages,
   getEffort,
   getMaxConcurrentRuns,
@@ -118,25 +106,13 @@ import type {
   SkillLibraryConfig,
 } from '../config/profile-schema';
 import { effectiveLarkCliIdentity } from '../config/profile-schema';
-import { parseClaudeUsage, readClaudeUsage, usageMarkdown } from './usage';
-import { canRunAdminCommand, canRunCommandInChat, canUseDm, canUseGroup } from '../policy/access';
+import { canRunAdminCommand, canRunCommandInChat } from '../policy/access';
 import { buildEncryptedAccountConfig } from '../config/store';
 import * as configOps from '../config/config-ops';
 import { log, reportMetric } from '../core/logger';
-import { renderCard } from '../card/run-renderer';
-import {
-  finalizeIfRunning,
-  initialState,
-  markInterrupted,
-  reduce,
-  type RunState,
-} from '../card/run-state';
 import { isAlive } from '../runtime/registry';
 import { readUiSidecar } from '../ui/sidecar';
 import { resolveWorkingDirectory } from '../policy/workspace';
-import { evaluateRunPolicy } from '../policy/run-policy';
-import type { RunExecutor } from '../runtime/run-executor';
-import { RunRejected } from '../runtime/errors';
 import { validateAppCredentials } from '../utils/feishu-auth';
 import { fetchKnownChats } from '../bot/lark-info';
 import { codeBlockPost } from '../card/code-snippets';
@@ -162,7 +138,7 @@ import {
   handleWs,
 } from './handlers/workspace';
 import { handleResume } from './handlers/resume';
-import { formatOwnerState, handleStatus, runtimeAccessStatus } from './handlers/status';
+import { handleStatus } from './handlers/status';
 import {
   handleExit,
   handlePs,
@@ -170,6 +146,8 @@ import {
   handleStop,
   handleTimeout,
 } from './handlers/lifecycle';
+import { handleDoctor } from './handlers/doctor';
+import { handleAccounts, handleApproval, handleHelp, handleUsage } from './handlers/usage';
 
 export type { CommandContext, Controls } from './types';
 
@@ -341,451 +319,6 @@ async function handleCopyCode(args: string, ctx: CommandContext): Promise<void> 
   } catch (err) {
     log.fail('command', err, { step: 'copycode' });
     await reply(ctx, '代码发送失败，请稍后再点一次。');
-  }
-}
-
-const DOCTOR_ECHO_PROMPT =
-  'Bridge doctor agent echo check. Do not inspect files, do not use history, and reply exactly: OK';
-const DOCTOR_RATE_LIMIT_MS = 30_000;
-const doctorInFlightProfiles = new Set<string>();
-const doctorLastByOperator = new Map<string, number>();
-
-async function handleDoctor(args: string, ctx: CommandContext): Promise<void> {
-  log.info('command', 'doctor', {
-    hasDescription: args.trim().length > 0,
-    chatMode: ctx.chatMode,
-  });
-
-  const rateKey = `${ctx.controls.profile}:${ctx.controls.configPath}:${ctx.msg.senderId}`;
-  const now = Date.now();
-  const last = doctorLastByOperator.get(rateKey);
-  if (last !== undefined && now - last < DOCTOR_RATE_LIMIT_MS) {
-    await reply(ctx, 'doctor rate limited: 同一用户 30 秒内只能触发一次。');
-    return;
-  }
-
-  const requestedCwd = effectiveWorkspaceCwd(ctx);
-  if (!requestedCwd) {
-    await reply(
-      ctx,
-      buildDoctorReport(ctx, {
-        workspaceCheck:
-          '未设置工作目录。先用 `/cd <path>` 或 `/ws use <name>` 选择工作目录后再运行 agent echo check。',
-        echoCheck: 'skipped',
-      }),
-    );
-    return;
-  }
-
-  const workspace = await resolveWorkingDirectory(requestedCwd);
-  if (!workspace.ok) {
-    await reply(
-      ctx,
-      buildDoctorReport(ctx, {
-        workspaceCheck: `${workspace.userVisible} 工作目录不可用时只执行 self-check，不启动 agent。`,
-        echoCheck: 'skipped',
-      }),
-    );
-    return;
-  }
-
-  if (!ctx.runExecutor) {
-    await reply(
-      ctx,
-      buildDoctorReport(ctx, {
-        workspaceCheck: `ok (${workspace.cwdRealpath})`,
-        echoCheck: 'run executor unavailable',
-      }),
-    );
-    return;
-  }
-
-  const profileKey = ctx.controls.profile;
-  if (doctorInFlightProfiles.has(profileKey)) {
-    await reply(ctx, 'doctor in-flight: 当前 profile 已有诊断运行中。');
-    return;
-  }
-  doctorLastByOperator.set(rateKey, now);
-
-  const capability = agentCapability(ctx.controls.profileConfig);
-  const policy = evaluateRunPolicy({
-    scope: {
-      source: 'im',
-      chatId: ctx.msg.chatId,
-      actorId: ctx.msg.senderId,
-      ...(ctx.msg.threadId ? { threadId: ctx.msg.threadId } : {}),
-    },
-    attachments: [],
-    prompt: DOCTOR_ECHO_PROMPT,
-    requestedCwd,
-    cwdRealpath: workspace.cwdRealpath,
-    access: canRunAdminCommand(ctx.controls.profileConfig, ctx.controls, ctx.msg.senderId),
-    capability,
-    profileConfig: ctx.controls.profileConfig,
-    now,
-    ttlMs: 60_000,
-  });
-  if (!policy.ok) {
-    await reply(
-      ctx,
-      buildDoctorReport(ctx, {
-        workspaceCheck: `ok (${workspace.cwdRealpath})`,
-        echoCheck: policy.rejectReason.userVisible,
-      }),
-    );
-    return;
-  }
-  const runtimeAccess = runtimeAccessStatus(ctx.controls.profileConfig);
-  const doctorReport = (echoCheck: string): string =>
-    buildDoctorReport(ctx, {
-      workspaceCheck: `ok (${workspace.cwdRealpath})`,
-      policyCheck:
-        runtimeAccess.label === 'sandbox'
-          ? `ok sandbox=${policy.sandbox}`
-          : `ok ${runtimeAccess.label}=${policy.permissionMode}`,
-      echoCheck,
-    });
-
-  // In group / topic chats other members would see the result card. Ack
-  // in-channel, deliver the actual analysis privately to the operator's
-  // open_id (Lark auto-opens the p2p chat with the bot).
-  const isP2p = ctx.chatMode === 'p2p';
-  if (!isP2p) {
-    await reply(ctx, '🔍 已收到诊断请求，分析结果将私信发给你。');
-  }
-
-  doctorInFlightProfiles.add(profileKey);
-  let execution: Awaited<ReturnType<RunExecutor['submit']>>;
-  try {
-    execution = await ctx.runExecutor.submit({
-      scopeId: `${ctx.scope}:doctor`,
-      policy,
-      nowait: true,
-      stopGraceMs: getAgentStopGraceMs(ctx.controls.cfg),
-      actor: { id: ctx.msg.senderId, ...(ctx.msg.senderName ? { name: ctx.msg.senderName } : {}) },
-      observability: {
-        profile: ctx.controls.profile,
-        agent: capability.agentId,
-        source: 'doctor',
-        stage: 'agent-probe',
-      },
-    });
-  } catch (err) {
-    doctorInFlightProfiles.delete(profileKey);
-    if (err instanceof RunRejected && err.code === 'pool-full') {
-      await reply(ctx, doctorReport('pool-full'));
-      return;
-    }
-    log.fail('command', err, { step: 'doctor.submit' });
-    reportMetric('command_fail', 1, { step: 'doctor.submit' });
-    await reply(ctx, doctorReport('failed'));
-    return;
-  }
-
-  try {
-    if (isP2p) {
-      // Streaming card path — operator is the only viewer in p2p.
-      await ctx.channel.stream(
-        ctx.msg.chatId,
-        {
-          card: {
-            initial: renderCard(withDoctorReport(initialState, doctorReport('pending'))),
-            producer: async (ctrl) => {
-              let state: RunState = initialState;
-              let echoText = '';
-              const echoStatus = (): string => formatDoctorEchoStatus(echoText, state);
-              const flush = (): Promise<void> =>
-                ctrl.update(renderCard(withDoctorReport(state, doctorReport(echoStatus()))));
-              for await (const evt of execution.subscribe()) {
-                if (execution.handle.interrupted) break;
-                // /doctor runs are session-less: skip 'system' so we don't
-                // persist a doctor's sessionId over the user's real session.
-                if (evt.type === 'system') continue;
-                if (evt.type === 'usage') {
-                  continue;
-                }
-                if (evt.type === 'text') echoText += evt.delta;
-                if (evt.type === 'final_text') echoText = evt.content;
-                state = reduce(state, evt);
-                await flush();
-                // Don't wait for stdout to close — some claude versions hang
-                // briefly post-result, which would leave the for-await stuck.
-                if (state.terminal !== 'running') break;
-              }
-              state = execution.handle.interrupted ? markInterrupted(state) : finalizeIfRunning(state);
-              await flush();
-            },
-          },
-        },
-        { replyTo: ctx.msg.messageId },
-      );
-    } else {
-      // Group / topic: buffer to completion, then DM the final card to the
-      // operator. No live streaming — the group should see nothing past the
-      // ack reply above.
-      let state: RunState = initialState;
-      let echoText = '';
-      for await (const evt of execution.subscribe()) {
-        if (execution.handle.interrupted) break;
-        if (evt.type === 'system') continue;
-        if (evt.type === 'usage') {
-          continue;
-        }
-        if (evt.type === 'text') echoText += evt.delta;
-        if (evt.type === 'final_text') echoText = evt.content;
-        state = reduce(state, evt);
-        if (state.terminal !== 'running') break;
-      }
-      state = execution.handle.interrupted ? markInterrupted(state) : finalizeIfRunning(state);
-      // Send a one-shot interactive card by open_id. Lark routes it to the
-      // user's p2p chat with the bot (auto-creates it if needed); other
-      // group members never see this payload.
-      await ctx.channel.send(ctx.msg.senderId, {
-        card: renderCard(
-          withDoctorReport(state, doctorReport(formatDoctorEchoStatus(echoText, state))),
-        ),
-      });
-    }
-  } catch (err) {
-    log.fail('command', err, { step: 'doctor' });
-    reportMetric('command_fail', 1, { step: 'doctor' });
-  } finally {
-    doctorInFlightProfiles.delete(profileKey);
-  }
-}
-
-function buildDoctorReport(
-  ctx: CommandContext,
-  opts: {
-    workspaceCheck?: string;
-    policyCheck?: string;
-    echoCheck?: string;
-  } = {},
-): string {
-  const queue = ctx.processPool?.snapshot();
-  const queueLine = queue
-    ? `${queue.active}/${queue.cap} active, ${queue.waiting} waiting`
-    : 'unknown';
-  const cwd = effectiveWorkspaceCwd(ctx);
-  const runtimeAccess = runtimeAccessStatus(ctx.controls.profileConfig);
-  const access =
-    ctx.msg.chatType === 'p2p'
-      ? canUseDm(ctx.controls.profileConfig, ctx.controls, ctx.msg.senderId)
-      : canUseGroup(
-          ctx.controls.profileConfig,
-          ctx.controls,
-          ctx.msg.chatId,
-          ctx.msg.senderId,
-        );
-  return [
-    'self-check: ok',
-    `profile: ${ctx.controls.profile}`,
-    `agent: ${ctx.agent.displayName} (${ctx.controls.profileConfig.agentKind})`,
-    `workspace: ${cwd ?? '(未设置)'}`,
-    `workspace default: ${ctx.controls.profileConfig.workspaces.default ? 'set' : 'missing'}`,
-    `${runtimeAccess.label}: ${runtimeAccess.value}`,
-    `access: ${access.ok ? 'ok' : 'denied'} (${access.reason})`,
-    `owner API: ${formatOwnerState(ctx)}`,
-    `queue: ${queueLine}`,
-    `run executor: ${ctx.runExecutor ? 'available' : 'unavailable'}`,
-    ...(opts.workspaceCheck ? [`workspace check: ${opts.workspaceCheck}`] : []),
-    ...(opts.policyCheck ? [`policy check: ${opts.policyCheck}`] : []),
-    ...(opts.echoCheck ? [`agent echo check: ${opts.echoCheck}`] : []),
-  ].join('\n');
-}
-
-function withDoctorReport(state: RunState, report: string): RunState {
-  return {
-    ...state,
-    blocks: [{ kind: 'text', content: report, streaming: false }, ...state.blocks],
-  };
-}
-
-function formatDoctorEchoStatus(echoText: string, state: RunState): string {
-  const trimmed = echoText.trim();
-  if (trimmed) return trimmed.length > 80 ? `${trimmed.slice(0, 80)}…` : trimmed;
-  if (state.terminal === 'running') return 'pending';
-  if (state.terminal === 'done') return 'empty';
-  return state.terminal;
-}
-
-async function handleHelp(_args: string, ctx: CommandContext): Promise<void> {
-  const card = helpCard(ctx.agent.displayName);
-  await ctx.channel.send(ctx.msg.chatId, { card }, commandReplyOptions(ctx));
-}
-
-// ─── /usage ───────────────────────────────────────────────────────────────
-
-/**
- * Plan quota, answered by the bridge itself through `claude -p /usage`: no
- * agent run, so it costs no quota and still answers while a run is busy or
- * stuck.
- */
-async function handleUsage(args: string, ctx: CommandContext): Promise<void> {
-  const key = args.trim().toLowerCase();
-  // `/usage` keeps answering the plan quota; a period asks for the
-  // per-person consumption ledger instead.
-  if (key && key !== 'quota') return handleUsageLedger(key, ctx);
-  return handlePlanQuota(ctx);
-}
-
-async function handlePlanQuota(ctx: CommandContext): Promise<void> {
-  // The plan quota of whoever runs the bridge, not something to show anyone
-  // else; their own consumption is open to all (`/usage today`).
-  if (!canRunAdminCommand(ctx.controls.profileConfig, ctx.controls, ctx.msg.senderId).ok) {
-    await reply(ctx, '订阅额度仅管理员可看。看自己的用量请发 `/usage today`（或 week / month）。');
-    return;
-  }
-  if (!agentDescriptor(ctx.controls.profileConfig.agentKind).planQuota) {
-    await reply(ctx, '`/usage` 目前只支持 Claude profile。');
-    return;
-  }
-  let raw: string;
-  try {
-    raw = await readClaudeUsage();
-  } catch (err) {
-    log.fail('command', err, { cmd: '/usage' });
-    await reply(ctx, `❌ 读取额度失败：${err instanceof Error ? err.message : String(err)}`);
-    return;
-  }
-  const accounts = await agentAccountsReport(
-    ctx.controls.profileConfig,
-    commandProfilePaths(ctx).profileDir,
-    accountNameView(ctx),
-  );
-  const body = usageMarkdown(parseClaudeUsage(raw), raw);
-  const card = usageCard(
-    accounts ? [`**CLI 登录账户**`, body, '', ...accounts, '_各账户用量取自它最近一次运行的报告。_'].join('\n') : body,
-  );
-  await ctx.channel.send(ctx.msg.chatId, { card }, commandReplyOptions(ctx));
-}
-
-// ─── /accounts ────────────────────────────────────────────────────────────
-
-/**
- * Accounts go by the owner's private names only in the owner's own DM: the
- * owner asked for them to stay out of every chat others can read (2026-11-06).
- */
-function accountNameView(ctx: CommandContext): { private: boolean } {
-  return {
-    private: ctx.msg.chatType === 'p2p' && Boolean(ctx.controls.botOwnerId) && ctx.msg.senderId === ctx.controls.botOwnerId,
-  };
-}
-
-/**
- * The profile's Claude subscription accounts: `/accounts` lists them as a
- * table (usage, resets, switch lines); `/accounts switch [name]` makes one the
- * main account — the best-scoring one with room when no name is given.
- */
-async function handleAccounts(args: string, ctx: CommandContext): Promise<void> {
-  const [sub = '', ...rest] = args.trim().split(/\s+/).filter(Boolean);
-  const profileDir = commandProfilePaths(ctx).profileDir;
-  try {
-    if (sub === '' || sub === 'list') {
-      const table = await agentAccountsTable(ctx.controls.profileConfig, profileDir, accountNameView(ctx));
-      await reply(ctx, table ?? '`/accounts` 目前只支持 Claude profile。');
-      return;
-    }
-    if (sub === 'switch' || sub === '切换') {
-      await reply(
-        ctx,
-        await switchAgentAccount(ctx.controls.profileConfig, profileDir, rest.join(' '), accountNameView(ctx)),
-      );
-      return;
-    }
-  } catch (err) {
-    log.fail('command', err, { cmd: '/accounts', sub });
-    await reply(ctx, `❌ ${err instanceof Error ? err.message : String(err)}`);
-    return;
-  }
-  await reply(ctx, '用法：`/accounts` 查看账户；`/accounts switch` 自动切到得分最高的可用账户；`/accounts switch <名字或 id>` 切到指定账户（它要在切换线以下，否则不切）；`/accounts switch <名字或 id> <百分比>` 同时把它的切换线临时调到该值，到该窗口重置或自动切走后恢复原线。');
-}
-
-// ─── /coffee ──────────────────────────────────────────────────────────────
-
-const USAGE_PERIODS: Record<string, { days: number; label: string }> = {
-  today: { days: 1, label: '今天' },
-  week: { days: 7, label: '近 7 天' },
-  month: { days: 30, label: '近 30 天' },
-};
-
-/**
- * `/usage today|week|month`: whose runs consumed how much of the owner's
- * agent quota. Everyone sees their own numbers; only an admin in a private
- * chat sees everyone's, so one chat never learns another person's usage.
- */
-async function handleUsageLedger(args: string, ctx: CommandContext): Promise<void> {
-  const ledger = ctx.controls.usage;
-  if (!ledger) {
-    await reply(ctx, '当前 profile 没有开启用量统计。');
-    return;
-  }
-  const key = args.trim().toLowerCase();
-  if (key && !USAGE_PERIODS[key]) {
-    await reply(ctx, '用法：`/usage` 看订阅额度；`/usage today|week|month` 看各人用量。');
-    return;
-  }
-  const periods = key ? [USAGE_PERIODS[key]!] : [USAGE_PERIODS.today!, USAGE_PERIODS.week!];
-  const everyone =
-    ctx.chatMode === 'p2p' &&
-    canRunAdminCommand(ctx.controls.profileConfig, ctx.controls, ctx.msg.senderId).ok;
-  const sections = periods.map((period) => {
-    const rows = ledger.report({ days: period.days, ...(everyone ? {} : { actorId: ctx.msg.senderId }) });
-    return formatUsageSection(period.label, rows, { everyone, selfId: ctx.msg.senderId });
-  });
-  const notes = [
-    '_费用是按 API 价格估算的；订阅账号不实际扣费，只用来比较各人占用额度的多少。Codex 不报费用，只看 token。_',
-    ...(ctx.chatMode !== 'p2p' && !everyone ? ['_只显示你自己的用量；管理员私聊发 `/usage` 可看所有人。_'] : []),
-  ];
-  await reply(ctx, [...sections, ...notes].join('\n\n'));
-}
-
-function formatUsageSection(
-  label: string,
-  rows: UsageReportRow[],
-  opts: { everyone: boolean; selfId: string },
-): string {
-  if (rows.length === 0) return `**${label}**\n暂无用量记录。`;
-  const total = rows.reduce((acc, row) => {
-    acc.turns += row.total.turns;
-    acc.inputTokens += row.total.inputTokens;
-    acc.cachedInputTokens += row.total.cachedInputTokens;
-    acc.outputTokens += row.total.outputTokens;
-    acc.costUsd += row.total.costUsd;
-    return acc;
-  }, emptyTotals());
-  if (!opts.everyone) return `**${label}**\n你：${formatUsageTotals(total)}`;
-  const shown = rows.slice(0, 10).map((row, i) => {
-    const who = row.actorId === opts.selfId ? '你' : (row.actorName ?? `…${row.actorId.slice(-6)}`);
-    return `${i + 1}. ${who}：${formatUsageTotals(row.total)}`;
-  });
-  const more = rows.length > 10 ? [`…另有 ${rows.length - 10} 人`] : [];
-  return [`**${label}**（${rows.length} 人）`, `合计：${formatUsageTotals(total)}`, ...shown, ...more].join('\n');
-}
-
-function formatUsageTotals(t: UsageTotals): string {
-  const cached = t.cachedInputTokens > 0 ? `（缓存 ${formatTokens(t.cachedInputTokens)}）` : '';
-  const cost = t.costUsd > 0 ? ` · 估算 $${t.costUsd.toFixed(2)}` : '';
-  return `${t.turns} 轮 · 输入 ${formatTokens(t.inputTokens)}${cached} · 输出 ${formatTokens(t.outputTokens)}${cost}`;
-}
-
-/**
- * `approval.allow|allowturn|deny <id>` from an approval card. Allowing needs
- * an admin; the requester may cancel (deny) their own pending step. A click
- * that changes something gets no reply — the cards themselves update.
- */
-async function handleApproval(args: string, ctx: CommandContext): Promise<void> {
-  const [verb, id] = args.trim().split(/\s+/);
-  const action = verb === 'allow' ? 'allow' : verb === 'allowturn' ? 'allow-turn' : verb === 'deny' ? 'deny' : undefined;
-  const broker = ctx.controls.approvals;
-  if (!broker || !action || !id) return;
-  const isAdmin = canRunAdminCommand(ctx.controls.profileConfig, ctx.controls, ctx.msg.senderId).ok;
-  const result = broker.decide(id, ctx.msg.senderId, action, isAdmin);
-  log.info('command', 'approval', { action, result, operator: ctx.msg.senderId.slice(-6) });
-  if (result === 'forbidden') {
-    await reply(ctx, action === 'deny' ? '只有发起人或管理员可以取消这一步。' : '只有管理员可以允许这一步。');
-  } else if (result === 'not-found') {
-    await reply(ctx, '这条审批已经处理过或已过期。');
   }
 }
 
