@@ -238,6 +238,30 @@ describe('scheduler ticking', () => {
     expect(JSON.stringify(sent[4]?.payload)).toContain('自动暂停');
   });
 
+  it('reports a run stopped by the time cap but does not count it toward auto-disable', async () => {
+    let now = new Date('2026-09-22T08:00:00').getTime();
+    const capped = (): JobRunRecord => ({ ...bad(), terminal: 'max_duration', error: '运行超过 60 分钟上限，已停止' });
+    let outcome: () => JobRunRecord = bad;
+    const scheduler = makeScheduler({ now: () => now, runJob: async () => outcome() });
+    const created = store.add(job());
+    scheduler.armJob(created.id);
+    now = new Date('2026-09-22T09:00:30').getTime();
+
+    await scheduler.tick();
+    expect(store.get(created.id)?.failureStreak).toBe(1);
+
+    outcome = capped;
+    for (let i = 0; i < 6; i++) {
+      now += 24 * 60 * 60 * 1000;
+      await scheduler.tick();
+    }
+    const stored = store.get(created.id);
+    expect(stored?.failureStreak).toBe(1);
+    expect(stored?.enabled).toBe(true);
+    expect(stored?.lastRun?.terminal).toBe('max_duration');
+    expect(sent).toHaveLength(7);
+  });
+
   it('clears the failure streak after a success', async () => {
     let now = new Date('2026-09-22T08:00:00').getTime();
     let outcome = bad;

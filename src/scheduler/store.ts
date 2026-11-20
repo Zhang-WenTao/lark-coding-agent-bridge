@@ -22,8 +22,8 @@ export class JobStore {
   constructor(path: string = paths.jobsFile) {
     this.file = new JsonFile(path, {
       mode: 0o600,
-      onLoadError: (err, movedTo) => {
-        if (!movedTo) throw err;
+      onLoadError: (err, movedTo, kind) => {
+        if (kind === 'read') throw err;
         // A corrupt jobs file must not take the bridge down with it — chat still
         // works, the operator finds the reason in the log, and the original is
         // kept at `movedTo` instead of being overwritten by the next save.

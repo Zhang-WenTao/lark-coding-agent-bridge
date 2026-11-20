@@ -1,4 +1,4 @@
-import { log, type LogFields } from './logger';
+import { log, reportError, type LogFields } from './logger';
 
 /**
  * Start `work` without waiting for it. A failure is logged under `phase`
@@ -6,5 +6,9 @@ import { log, type LogFields } from './logger';
  * handler as one line with no idea which run or chat it came from.
  */
 export function fireAndForget(work: Promise<unknown>, phase: string, fields?: LogFields): void {
-  work.catch((err: unknown) => log.fail(phase, err, fields));
+  work.catch((err: unknown) => {
+    log.fail(phase, err, fields);
+    // Still reported, as the unhandled-rejection handler used to do.
+    reportError(err, { kind: 'fireAndForget', phase, ...fields });
+  });
 }

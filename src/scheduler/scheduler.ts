@@ -241,7 +241,14 @@ export class Scheduler {
       return record;
     }
 
-    const failureStreak = record.ok ? 0 : (job.failureStreak ?? 0) + 1;
+    // Hitting `cronRunMaxMinutes` is reported like any failure but does not
+    // count toward auto-disable: a job that has simply grown longer should
+    // not be switched off after a few slow weeks.
+    const failureStreak = record.ok
+      ? 0
+      : record.terminal === 'max_duration'
+        ? (job.failureStreak ?? 0)
+        : (job.failureStreak ?? 0) + 1;
     const exhausted = failureStreak >= MAX_FAILURE_STREAK;
     const current = this.store.get(job.id) ?? job;
     this.store.update(job.id, {

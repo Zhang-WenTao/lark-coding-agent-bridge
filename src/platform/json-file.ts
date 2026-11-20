@@ -13,10 +13,11 @@ export interface JsonFileOptions {
   mode?: number;
   /**
    * The file exists but could not be used: unreadable, or not valid JSON.
-   * When it was not valid JSON it has already been renamed to `movedTo`, so
-   * the next write cannot overwrite the only copy.
+   * When it was not valid JSON (`kind: 'parse'`) it has already been renamed
+   * to `movedTo`, so the next write cannot overwrite the only copy; `movedTo`
+   * is unset if that rename failed.
    */
-  onLoadError: (err: unknown, movedTo?: string) => void;
+  onLoadError: (err: unknown, movedTo?: string, kind?: 'read' | 'parse') => void;
   /** A queued write failed; later writes still run. */
   onPersistError: (err: unknown) => void;
   /** Clock for the `.corrupt-<ts>` suffix (tests). */
@@ -46,13 +47,13 @@ export class JsonFile {
     try {
       text = await readFile(this.path, 'utf8');
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') this.opts.onLoadError(err);
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') this.opts.onLoadError(err, undefined, 'read');
       return undefined;
     }
     try {
       return JSON.parse(text) as unknown;
     } catch (err) {
-      this.opts.onLoadError(err, await this.moveAside(this.path));
+      this.opts.onLoadError(err, await this.moveAside(this.path), 'parse');
       return undefined;
     }
   }

@@ -249,3 +249,68 @@ describe('guest runs: told where to look', () => {
     expect(guestAccessInstruction(owner)).toBeUndefined();
   });
 });
+
+// Review 2026-11-20: shapes of `cd` into a read-only root that the precise
+// cd tracking first missed, piped-to-shell searches, and the own tool output.
+describe('guest runs: writing from inside a read-only root', () => {
+  it.each([
+    ['cd with stderr silenced', `cd ${READ_ONLY} 2>/dev/null && touch x`],
+    ['cd with stdout silenced', `cd ${READ_ONLY} >/dev/null; touch x`],
+    ['cd -P', `cd -P ${READ_ONLY} && touch x`],
+    ['cd -L', `cd -L ${READ_ONLY} && touch x`],
+    ['cd --', `cd -- ${READ_ONLY} && touch x`],
+    ['redirect glued to the path', `cd ${READ_ONLY}>/dev/null && touch x`],
+    ['pushd', `pushd ${READ_ONLY} && touch x`],
+    ['a target built from a variable', `cd "$D"${READ_ONLY} && touch x`],
+    ['ln with one path (link lands in cwd)', `cd ${READ_ONLY} && ln -s /tmp/evil`],
+  ])('refuses %s', (_label, command) => {
+    expect(bash(command).code).toBe(2);
+  });
+
+  it.each([
+    ['reading after cd with stderr silenced', `cd ${READ_ONLY} 2>/dev/null && grep -rn "foo" . | head`],
+    ['writing in the workspace after cd -P', `cd -P ${WORKSPACE} && touch x`],
+  ])('allows %s', (_label, command) => {
+    expect(bash(command).code).toBe(0);
+  });
+});
+
+describe('guest runs: searches whose output is run', () => {
+  const g = ownerOnlyGuard({
+    larkChannelHome: LC,
+    workspace: WORKSPACE,
+    home: HOME,
+    root: ROOT,
+    deniedCommands: ['kubectl\\s+delete'],
+  });
+  const run = (command: string) => hook(g, 'Bash', { command });
+
+  it('still lets a search look for the text', () => {
+    expect(run(`grep -rn "kubectl delete" ${WORKSPACE}`).code).toBe(0);
+  });
+
+  it.each([
+    ['piped into sh', `grep -oh 'kubectl delete pod x' ${WORKSPACE}/f | sh`],
+    ['run through $()', `$(grep -oh 'kubectl delete pod' ${WORKSPACE}/f)`],
+    ['$() inside double quotes around single quotes', `grep "a'$(kubectl delete pod x)'b" ${WORKSPACE}/f`],
+    ['fed to xargs', `grep -oh 'kubectl delete pod x' ${WORKSPACE}/f | xargs -I{} sh -c {}`],
+  ])('refuses one %s', (_label, command) => {
+    expect(run(command).code).toBe(2);
+  });
+});
+
+describe("guest runs: the run's own tool output is never writable", () => {
+  const dir = `${PROJECTS}/${SESSION}/tool-results`;
+  it.each([
+    ['a redirect into it', `echo hi > ${dir}/a`],
+    ['removing it', `rm -rf ${dir}`],
+    ['a symlink placed in it', `ln -s ../../../../settings.json ${dir}/s`],
+    ['writing after cd into it', `cd ${dir} && touch x`],
+  ])('refuses %s', (_label, command) => {
+    expect(bash(command, session).code).toBe(2);
+  });
+
+  it('still reads it', () => {
+    expect(bash(`cat ${dir}/a.txt`, session).code).toBe(0);
+  });
+});

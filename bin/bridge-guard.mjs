@@ -409,8 +409,36 @@ function patternWords(args, spec) {
  * Single-quoted text and backslash-escaped characters are literal.
  */
 function runsCommand(raw) {
-  const live = raw.replace(/'[^']*'/g, '').replace(/\\./g, '');
-  return /\$\(|`|<\(/.test(live);
+  // Inside double quotes `'` is an ordinary character and `$(…)` / backticks
+  // still run, so quotes have to be tracked, not stripped by pattern.
+  let quote = '';
+  for (let i = 0; i < raw.length; i++) {
+    const c = raw[i];
+    if (quote === "'") {
+      if (c === "'") quote = '';
+      continue;
+    }
+    if (c === '\\') {
+      i++;
+      continue;
+    }
+    if (c === '`' || (c === '$' && raw[i + 1] === '(')) return true;
+    if (quote === '"') {
+      if (c === '"') quote = '';
+      continue;
+    }
+    if (c === "'" || c === '"') quote = c;
+    else if (c === '<' && raw[i + 1] === '(') return true;
+  }
+  return false;
+}
+
+// The command's own output is run (`grep -oh … f | sh`, `$(grep …)`, `eval`,
+// `xargs`): what a search "looks for" may then be the command itself.
+const RUNS_OUTPUT = /\|\s*(?:sudo\s+)?(?:env\s+)?(?:\S*\/)?(?:ba|z|da|k|c|tc|fi)?sh\b|\b(?:eval|xargs|source)\b/;
+
+function runsOutput(cmd) {
+  return RUNS_OUTPUT.test(cmd) || runsCommand(cmd);
 }
 
 /** `cmd` with the patterns of search tools blanked out (same length). */
@@ -440,7 +468,9 @@ function writeArgs(trimmed) {
   while (i < words.length && (/^[A-Za-z_]\w*=/.test(words[i]) || words[i] === 'sudo')) i++;
   const verb = (words[i] ?? '').split('/').pop();
   const args = words.slice(i + 1).filter((w) => w && !w.startsWith('-'));
-  return DEST_LAST.has(verb) ? args.slice(-1) : args;
+  // `ln -s /x` (one path) creates its link in the current directory.
+  if (DEST_LAST.has(verb)) return args.length > 1 ? args.slice(-1) : [...args, '.'];
+  return args;
 }
 
 /** The write-fenced place the shell is in when it reaches this segment, if any. */
@@ -537,11 +567,32 @@ function outOfScope(segment, here, cfg) {
   return null;
 }
 
-/** Where the shell is after `segment`: only a plain `cd <path>` moves it. */
+/**
+ * Where the shell is after `segment`. `cd` / `pushd` with redirections
+ * (`2>/dev/null`) and options (`-P`, `-L`, `--`) still move it; a target that
+ * cannot be read off the text (`cd "$X"`) is reported as `unknown`.
+ */
+function cdTarget(segment, here) {
+  const words = segment
+    .trim()
+    .replace(/(?:(?<=\s)\d+|&)?>{1,2}\s*(?:&\d+|\S+)/g, ' ')
+    .trim()
+    .split(/\s+/);
+  if (words[0] !== 'cd' && words[0] !== 'pushd') return null;
+  let i = 1;
+  while (i < words.length && /^-(?:-|[PLe@]+)$/.test(words[i])) {
+    if (words[i++] === '--') break;
+  }
+  const rest = words.slice(i);
+  if (rest.length === 0) return { dir: here };
+  const target = rest[0].replace(/^(['"])(.*)\1$/, '$2');
+  if (rest.length > 1 || /[\s'"$`*?[]/.test(target) || target === '-') return { unknown: true };
+  return { dir: isAbsolute(target) ? resolve(target) : resolve(here, target) };
+}
+
 function nextDir(segment, here) {
-  const cd = segment.trim().match(/^cd\s+(['"]?)([^\s'"$`]+)\1$/);
-  if (!cd) return here;
-  return isAbsolute(cd[2]) ? resolve(cd[2]) : resolve(here, cd[2]);
+  const cd = cdTarget(segment, here);
+  return cd?.dir ?? here;
 }
 
 function decideBash(command, cfg, cwd) {
@@ -549,7 +600,7 @@ function decideBash(command, cfg, cwd) {
   if (CONTROL.test(full)) return deny('这条命令会控制 bridge 进程（启停、重启或 launchd）');
   // What a search looks for is text: `git grep "INSERT INTO t"` and
   // `grep -r "kubectl delete" docs` run neither.
-  const searched = blankSearchPatterns(full);
+  const searched = runsOutput(full) ? full : blankSearchPatterns(full);
   for (const re of cfg.deniedCommands ?? []) {
     if (new RegExp(re).test(searched)) return deny('这条命令属于仅限主人的操作');
   }
@@ -560,7 +611,13 @@ function decideBash(command, cfg, cwd) {
   for (const segment of segments) {
     const refused = fencedArea(segment, here, cfg);
     if (refused) return refused;
-    here = nextDir(segment, here);
+    const cd = cdTarget(segment, here);
+    if (cd?.unknown) {
+      // `cd "$RO"/x`: the target is not plain text. If it names a write-fenced
+      // place, assume the shell is now inside it.
+      const named = (cfg.rules ?? []).find((rule) => rule.bash === 'write' && mentioned(segment, rule) !== null);
+      if (named) here = named.path;
+    } else if (cd) here = cd.dir;
   }
   if (BARE_CD.test(cmd)) return deny('这条命令会进入主人的主目录');
   // Relative paths count from wherever the earlier `cd`s of this command left
@@ -644,9 +701,12 @@ function withSessionOutput(cfg, hookInput) {
   return {
     ...cfg,
     allowedRoots: [...(cfg.allowedRoots ?? []), dir],
-    rules: (cfg.rules ?? []).map((rule) =>
-      rule.bash === 'any' && within(dir, rule.path) ? { ...rule, allow: [...(rule.allow ?? []), open] } : rule,
-    ),
+    rules: [
+      ...(cfg.rules ?? []).map((rule) =>
+        rule.bash === 'any' && within(dir, rule.path) ? { ...rule, allow: [...(rule.allow ?? []), open] } : rule,
+      ),
+      { path: dir, bash: 'write' },
+    ],
   };
 }
 
