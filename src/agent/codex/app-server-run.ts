@@ -3,6 +3,7 @@ import type { Readable, Writable } from 'node:stream';
 import type { CodexSandboxMode } from '../../config/permissions';
 import { log } from '../../core/logger';
 import { spawnProcess, type SpawnedProcessByStdio } from '../../platform/spawn';
+import { trackAgentChild } from '../../platform/child-ledger';
 import type { AgentEvent, AgentRun, RunApprovals } from '../types';
 import { isReadOnlyCommand } from '../../runtime/approvals';
 import { CodexAppServerTranslator } from './app-server-translator';
@@ -57,6 +58,7 @@ export function startCodexAppServerRun(opts: CodexAppServerRunOptions): AgentRun
     env: opts.env,
     stdio: ['pipe', 'pipe', 'pipe'],
   }) as AppServerChild;
+  trackAgentChild(child, opts.binary);
   log.info('agent', 'spawn', {
     pid: child.pid ?? null,
     cwd: opts.cwd,

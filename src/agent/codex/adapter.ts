@@ -7,6 +7,7 @@ import type { SandboxMode } from '../../config/profile-schema';
 import type { EffortLevel } from '../../config/schema';
 import { log } from '../../core/logger';
 import { mergeProcessEnv, spawnProcess, type SpawnedProcessByStdio } from '../../platform/spawn';
+import { trackAgentChild } from '../../platform/child-ledger';
 import { SpawnFailed } from '../../runtime/errors';
 import { prefixBridgeSystemPrompt } from '../bridge-system-prompt';
 import { buildLarkChannelEnv, type LarkChannelEnvContext } from '../lark-channel-env';
@@ -215,6 +216,7 @@ export class CodexAdapter implements AgentAdapter {
       env: this.childEnv(),
       stdio: ['pipe', 'pipe', 'pipe'],
     }) as CodexChild;
+    trackAgentChild(child, this.binary);
 
     log.info('agent', 'spawn', {
       pid: child.pid ?? null,

@@ -58,7 +58,10 @@ export { assertReconnectAgentKindUnchanged, createRuntimeAgent };
 import { SessionStore } from '../../session/store';
 import { SessionCatalog } from '../../session/catalog';
 import { WorkspaceStore } from '../../workspace/store';
+import { join } from 'node:path';
 import { crashExitHandler } from '../crash-exit';
+import { installChildLedger } from '../../platform/child-ledger';
+import { reapOrphanAgentChildren } from '../../runtime/reap-agent-children';
 
 // Prefer IPv4 — Node 20+ defaults to "verbatim" which respects whatever
 // the resolver returns first; in IPv6-broken networks (WSL2, certain VPNs,
@@ -90,6 +93,24 @@ process.on(
     exit: (code) => process.exit(code),
   }),
 );
+
+/**
+ * Before any run starts: stop agent processes a previous bridge process left
+ * running when it died without stopping them (§6 L3), then record ours.
+ */
+async function startAgentChildLedger(rootDir: string): Promise<void> {
+  const dir = join(rootDir, 'agent-children');
+  try {
+    await reapOrphanAgentChildren(dir);
+  } catch (err) {
+    log.warn('agent-children', 'reap-failed', { err: String(err) });
+  }
+  try {
+    installChildLedger(dir);
+  } catch (err) {
+    log.warn('agent-children', 'install-failed', { err: String(err) });
+  }
+}
 
 const MEDIA_GC_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
@@ -138,6 +159,7 @@ async function runClassic(opts: StartOptions): Promise<void> {
   });
   const { cfg, configPath, appPaths } = runtime;
   configureLogger({ logsDir: appPaths.logsDir });
+  await startAgentChildLedger(appPaths.rootDir);
   await loadTelemetryAdapter({
     version: pkg.version,
     appId: cfg.accounts.app.id,
@@ -196,6 +218,7 @@ async function runSupervisorConsole(opts: StartOptions): Promise<void> {
     );
     return;
   }
+  await startAgentChildLedger(appPaths.rootDir);
 
   await loadTelemetryAdapter({
     version: pkg.version,

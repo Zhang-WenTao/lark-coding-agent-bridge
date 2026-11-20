@@ -2,6 +2,7 @@ import { mkdir } from 'node:fs/promises';
 import { log } from '../core/logger';
 import { JsonFile } from '../platform/json-file';
 import { mergeProcessEnv, spawnProcess } from '../platform/spawn';
+import { trackAgentChild } from '../platform/child-ledger';
 import type { AgentKind } from '../config/profile-schema';
 import { FABLE_WINDOW } from './claude/accounts';
 import { EFFORT_LEVELS, type AutoEffortPreference, type EffortLevel } from '../config/schema';
@@ -328,6 +329,7 @@ export async function classify(
       stdio: ['pipe', 'pipe', 'ignore'],
       env: mergeProcessEnv(process.env, opts.env ?? {}),
     });
+    trackAgentChild(child, opts.binary ?? 'claude');
     const timer = setTimeout(() => {
       child.kill('SIGTERM');
       finish(undefined);
