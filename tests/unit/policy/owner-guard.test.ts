@@ -196,7 +196,7 @@ describe('guest runs: read-only roots', () => {
   it.each([
     ['writing a file', `echo x > ${READ_ONLY}/a.txt`],
     ['deleting', `rm -rf ${READ_ONLY}/logic`],
-    ['pulling', `git -C ${READ_ONLY} pull`],
+    ['pulling with a config override', `git -C ${READ_ONLY} -c core.sshCommand=x pull`],
     ['switching branches inside it', `cd ${READ_ONLY} && git checkout -b x`],
     ['cd then write', `cd ${READ_ONLY} && echo x > a.txt`],
     ['an in-place edit', `sed -i '' s/a/b/ ${READ_ONLY}/a.c`],

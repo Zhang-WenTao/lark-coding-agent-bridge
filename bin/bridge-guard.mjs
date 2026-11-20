@@ -217,7 +217,19 @@ function isPlainFetch(words) {
   );
 }
 
-/** Read-only forms of git subcommands that can also write. */
+/**
+ * `git clone` brings code in without touching anything that exists (主人
+ * 11-20：pull / clone / fetch 这类更新代码的不拦，push 仍拦). Not plain: options
+ * that run a command or plant hooks — `--upload-pack` / `-u`, `--template`,
+ * `--config` / `-c` (core.sshCommand, core.fsmonitor …).
+ */
+function isPlainClone(words) {
+  return !words.some(
+    (w) => /^--(?:upload-pack|template|config)(?:=|$)/.test(w) || /^-[a-zA-Z]*[uc]/.test(w),
+  );
+}
+
+/** Read-only (or update-only) forms of git subcommands that can also write. */
 function isGitListing(sub, rest) {
   const words = rest
     .trim()
@@ -230,6 +242,11 @@ function isGitListing(sub, rest) {
       return plain.length === 0 || ['get-url', 'show'].includes(plain[0]);
     case 'fetch':
       return isPlainFetch(words);
+    // Updates the checkout from its upstream; same unsafe options as fetch.
+    case 'pull':
+      return isPlainFetch(words);
+    case 'clone':
+      return isPlainClone(words);
     case 'stash':
       return ['list', 'show'].includes(plain[0]);
     case 'archive':
@@ -238,7 +255,7 @@ function isGitListing(sub, rest) {
     case 'worktree':
       return plain[0] === 'list';
     case 'submodule':
-      return plain.length === 0 || plain[0] === 'status';
+      return plain.length === 0 || ['status', 'update', 'init', 'sync'].includes(plain[0]);
     case 'reflog':
       return !['expire', 'delete', 'drop'].includes(plain[0]);
     case 'config': {
@@ -263,8 +280,8 @@ function isGitRead(trimmed) {
   if (GIT_READ.test(trimmed)) return true;
   const call = trimmed.match(GIT_CALL);
   if (!call) return false;
-  // `git -c core.sshCommand=… fetch` runs a command: fetch only without `-c`.
-  if (['fetch', 'remote'].includes(call[1]) && /\sgit\s+(?:\S+\s+)*?-c\s/.test(` ${trimmed.slice(0, trimmed.length - call[2].length)}`)) return false;
+  // `git -c core.sshCommand=… fetch` runs a command: updates only without `-c`.
+  if (['fetch', 'remote', 'pull', 'clone', 'submodule'].includes(call[1]) && /\sgit\s+(?:\S+\s+)*?-c\s/.test(` ${trimmed.slice(0, trimmed.length - call[2].length)}`)) return false;
   return isGitListing(call[1], call[2]);
 }
 

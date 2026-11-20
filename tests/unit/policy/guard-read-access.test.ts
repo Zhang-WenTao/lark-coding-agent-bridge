@@ -144,6 +144,12 @@ describe('guest runs: writes after cd into a read-only place', () => {
     ['fetching all with prune', `git -C ${READ_ONLY} fetch --all --prune --tags`],
     ['fetching by url', `cd ${READ_ONLY} && git fetch https://github.com/a/b.git dev && git fetch git@github.com:a/b.git`],
     ['remote update', `cd ${READ_ONLY} && git remote update`],
+    // 主人 11-20：pull / clone / fetch 这类更新代码的都不拦，push 仍拦。
+    ['pulling', `cd ${READ_ONLY} && git pull -q`],
+    ['pulling fast-forward only', `git -C ${READ_ONLY} pull --ff-only origin dev`],
+    ['pulling with rebase', `cd ${READ_ONLY} && git pull --rebase`],
+    ['cloning into it', `cd ${READ_ONLY} && git clone -q --depth 1 https://github.com/a/b.git`],
+    ['updating submodules', `cd ${READ_ONLY} && git submodule update --init --recursive`],
   ])('allows %s', (_label, command) => {
     expect(bash(command).code).toBe(0);
   });
@@ -152,7 +158,12 @@ describe('guest runs: writes after cd into a read-only place', () => {
     ['touching a file there', `cd ${READ_ONLY} && touch x`],
     ['making a directory there', `cd ${READ_ONLY} && mkdir -p sub`],
     ['copying into it', `cd ${READ_ONLY} && cp /tmp/a .`],
-    ['pulling', `cd ${READ_ONLY} && git pull -q`],
+    ['pulling with upload-pack', `cd ${READ_ONLY} && git pull --upload-pack='touch /tmp/x' origin`],
+    ['pulling with a config override', `cd ${READ_ONLY} && git -c core.hooksPath=/tmp/h pull`],
+    ['cloning with a template', `cd ${READ_ONLY} && git clone --template=/tmp/t https://github.com/a/b.git`],
+    ['cloning with a config option', `cd ${READ_ONLY} && git clone -c core.fsmonitor='touch /tmp/x' https://github.com/a/b.git`],
+    ['cloning with upload-pack', `cd ${READ_ONLY} && git clone -u 'touch /tmp/x' https://github.com/a/b.git`],
+    ['pushing', `cd ${READ_ONLY} && git push origin dev`],
     ['fetching into a local branch', `cd ${READ_ONLY} && git fetch origin dev:dev`],
     ['force-fetching a refspec', `cd ${READ_ONLY} && git fetch origin +dev`],
     ['fetching with upload-pack', `cd ${READ_ONLY} && git fetch --upload-pack='touch /tmp/x' origin`],
@@ -283,7 +294,7 @@ describe('guest runs: writing from inside a read-only root', () => {
     ['cd as an if condition', `if cd ${READ_ONLY}; then touch x; fi`],
     ['builtin cd', `builtin cd ${READ_ONLY} && touch x`],
     ['command cd', `command cd ${READ_ONLY} && touch x`],
-    ['git pull in a loop body', `cd ${READ_ONLY} && echo 1 | while read n; do git pull -q origin; done`],
+    ['git checkout in a loop body', `cd ${READ_ONLY} && echo 1 | while read n; do git checkout -q dev; done`],
     ['git archive -o into it', `cd ${READ_ONLY} && git archive -o out.tar HEAD`],
     ['a subshell cd elsewhere does not move the outer shell', `cd ${READ_ONLY} && (cd /tmp && ls) && touch x`],
   ])('refuses %s', (_label, command) => {

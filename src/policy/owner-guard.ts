@@ -289,7 +289,7 @@ export function guestAccessInstruction(guard: RunGuard): string | undefined {
   return [
     '本轮不是 bot 主人发起的。主人主目录下能访问的只有下面这些位置，找代码和文件先在这里找，不要去列主目录或别的目录猜位置：',
     ...(rw.length > 0 ? [`- 可读写：${rw.join('、')}`] : []),
-    ...(ro.length > 0 ? [`- 只读（可以读、搜索、用 git 看历史和 git fetch，不能改动、不能 pull 或切分支）：${ro.join('、')}`] : []),
+    ...(ro.length > 0 ? [`- 只读（可以读、搜索、用 git 看历史，可以 git fetch / pull（建议 --ff-only）/ clone 拉最新代码；不能改文件、切分支、提交或 push）：${ro.join('、')}`] : []),
     '- 另外还有技能目录、本次的附件，以及本会话自己保存的工具输出。',
     '知识笔记用 `<notesDir>/<笔记名>.md` 的完整路径读；按关键词找写成 ' +
       '`grep -ril <关键词> <notesDir>/global <notesDir>/global-external <notesDir>/external`。' +
