@@ -1,6 +1,5 @@
-import { readFile } from 'node:fs/promises';
 import { log } from '../core/logger';
-import { writeFileAtomic } from '../platform/atomic-write';
+import { JsonFile } from '../platform/json-file';
 import type { PendingRotation } from './smart-session';
 
 /** One scope's agent-requested close, as written to disk. */
@@ -31,25 +30,23 @@ function isStoredRotation(x: unknown): x is StoredRotation {
  */
 export class PendingRotationStore {
   private data: RotationMap = {};
-  private saving: Promise<void> = Promise.resolve();
-  private readonly path: string | undefined;
+  private readonly file: JsonFile;
 
   constructor(path?: string) {
-    this.path = path;
+    this.file = new JsonFile(path, {
+      mode: 0o600,
+      onLoadError: (err, movedTo) => log.warn('rotation-store', 'load-failed', { err: String(err), movedTo }),
+      onPersistError: (err) => log.warn('rotation-store', 'persist-failed', { err: String(err) }),
+    });
   }
 
   async load(now: number = Date.now()): Promise<void> {
-    if (!this.path) return;
-    try {
-      const raw = JSON.parse(await readFile(this.path, 'utf8')) as Record<string, unknown>;
-      this.data = {};
-      for (const [scope, entry] of Object.entries(raw)) {
-        if (isStoredRotation(entry) && now - entry.requestedAt < MAX_AGE_MS) this.data[scope] = entry;
-      }
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
-      log.warn('rotation-store', 'load-failed', { err: String(err) });
-      this.data = {};
+    const raw = await this.file.load();
+    if (raw === undefined) return;
+    this.data = {};
+    if (!raw || typeof raw !== 'object') return;
+    for (const [scope, entry] of Object.entries(raw)) {
+      if (isStoredRotation(entry) && now - entry.requestedAt < MAX_AGE_MS) this.data[scope] = entry;
     }
   }
 
@@ -72,15 +69,10 @@ export class PendingRotationStore {
   }
 
   async flush(): Promise<void> {
-    await this.saving;
+    await this.file.flush();
   }
 
   private schedulePersist(): void {
-    if (!this.path) return;
-    const path = this.path;
-    const snapshot = JSON.stringify(this.data);
-    this.saving = this.saving
-      .then(() => writeFileAtomic(path, snapshot, { mode: 0o600 }))
-      .catch((err) => log.warn('rotation-store', 'persist-failed', { err: String(err) }));
+    this.file.write(JSON.stringify(this.data));
   }
 }

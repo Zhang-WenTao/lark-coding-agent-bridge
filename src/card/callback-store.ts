@@ -1,29 +1,26 @@
-import { readFile } from 'node:fs/promises';
 import { log } from '../core/logger';
-import { writeFileAtomic } from '../platform/atomic-write';
+import { JsonFile } from '../platform/json-file';
 
 type NonceState = 'used' | 'revoked';
 
 export class CallbackNonceStore {
-  private readonly path: string;
   private readonly nonces = new Map<string, NonceState>();
-  private saving: Promise<void> = Promise.resolve();
+  private readonly file: JsonFile;
 
   constructor(path: string) {
-    this.path = path;
+    this.file = new JsonFile(path, {
+      mode: 0o600,
+      onLoadError: (err, movedTo) => log.fail('callback-nonce', err, { step: 'load', movedTo }),
+      onPersistError: (err) => log.fail('callback-nonce', err, { step: 'persist' }),
+    });
   }
 
   async load(): Promise<void> {
-    try {
-      const raw = JSON.parse(await readFile(this.path, 'utf8')) as unknown;
-      if (!raw || typeof raw !== 'object') return;
-      this.nonces.clear();
-      for (const [nonce, state] of Object.entries(raw as Record<string, unknown>)) {
-        if (state === 'used' || state === 'revoked') this.nonces.set(nonce, state);
-      }
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
-      log.fail('callback-nonce', err, { step: 'load' });
+    const raw = await this.file.load();
+    if (!raw || typeof raw !== 'object') return;
+    this.nonces.clear();
+    for (const [nonce, state] of Object.entries(raw as Record<string, unknown>)) {
+      if (state === 'used' || state === 'revoked') this.nonces.set(nonce, state);
     }
   }
 
@@ -44,20 +41,10 @@ export class CallbackNonceStore {
   }
 
   async flush(): Promise<void> {
-    await this.saving;
+    await this.file.flush();
   }
 
   private schedulePersist(): void {
-    this.saving = this.saving
-      .then(async () => {
-        await writeFileAtomic(
-          this.path,
-          `${JSON.stringify(Object.fromEntries(this.nonces), null, 2)}\n`,
-          { mode: 0o600 },
-        );
-      })
-      .catch((err: unknown) => {
-        log.fail('callback-nonce', err, { step: 'persist' });
-      });
+    this.file.write(`${JSON.stringify(Object.fromEntries(this.nonces), null, 2)}\n`);
   }
 }

@@ -1,7 +1,6 @@
-import { readFile } from 'node:fs/promises';
 import type { NormalizedMessage } from '@larksuite/channel';
 import { log } from '../core/logger';
-import { writeFileAtomic } from '../platform/atomic-write';
+import { JsonFile } from '../platform/json-file';
 
 /** One scope's queued messages, as written to disk. */
 export interface PendingRecord {
@@ -31,24 +30,23 @@ function isPendingRecord(x: unknown): x is PendingRecord {
  */
 export class PendingStore {
   private data: PendingMap = {};
-  private saving: Promise<void> = Promise.resolve();
-  private readonly path: string;
+  private readonly file: JsonFile;
 
   constructor(path: string) {
-    this.path = path;
+    this.file = new JsonFile(path, {
+      mode: 0o600,
+      onLoadError: (err, movedTo) => log.warn('pending-store', 'load-failed', { err: String(err), movedTo }),
+      onPersistError: (err) => log.warn('pending-store', 'persist-failed', { err: String(err) }),
+    });
   }
 
   async load(): Promise<void> {
-    try {
-      const raw = JSON.parse(await readFile(this.path, 'utf8')) as Record<string, unknown>;
-      this.data = {};
-      for (const [scope, entry] of Object.entries(raw)) {
-        if (isPendingRecord(entry) && entry.messages.length > 0) this.data[scope] = entry;
-      }
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
-      log.warn('pending-store', 'load-failed', { err: String(err) });
-      this.data = {};
+    const raw = await this.file.load();
+    if (raw === undefined) return;
+    this.data = {};
+    if (!raw || typeof raw !== 'object') return;
+    for (const [scope, entry] of Object.entries(raw)) {
+      if (isPendingRecord(entry) && entry.messages.length > 0) this.data[scope] = entry;
     }
   }
 
@@ -73,13 +71,10 @@ export class PendingStore {
   }
 
   async flush(): Promise<void> {
-    await this.saving;
+    await this.file.flush();
   }
 
   private schedulePersist(): void {
-    const snapshot = JSON.stringify(this.data);
-    this.saving = this.saving
-      .then(() => writeFileAtomic(this.path, snapshot, { mode: 0o600 }))
-      .catch((err) => log.warn('pending-store', 'persist-failed', { err: String(err) }));
+    this.file.write(JSON.stringify(this.data));
   }
 }

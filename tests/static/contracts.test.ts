@@ -57,7 +57,7 @@ describe('static architecture contracts', () => {
       'src/dream/state.ts',
     ]) {
       const source = read(file);
-      expect(source, file).toContain('writeFileAtomic');
+      expect(source, file).toMatch(/writeFileAtomic|new JsonFile\(/);
       expect(source, file).toContain('mode: 0o600');
       expect(source, file).not.toMatch(/\bwriteFile\(/);
     }
