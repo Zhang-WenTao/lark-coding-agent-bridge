@@ -4,17 +4,28 @@ import { registerChannelEvents, type ChannelEventSinks } from '../../../src/bot/
 import { EDIT_EVENT } from '../../../src/bot/edit';
 import { RECALL_EVENT } from '../../../src/bot/recall';
 
+/* eslint-disable @typescript-eslint/no-explicit-any */
+type Fn = (arg?: any) => any;
+interface Handlers {
+  message: Fn;
+  cardAction: Fn;
+  comment: Fn;
+  reconnecting: Fn;
+  reconnected: Fn;
+}
+
 function fakeChannel(withRaw = true) {
-  let handlers: Record<string, (arg: any) => unknown> = {};
-  const raw = new Map<string, (arg: unknown) => unknown>();
+  let handlers = {} as Handlers;
+  const raw = new Map<string, Fn>();
   const channel = {
-    on: (h: typeof handlers) => {
+    on: (h: Handlers) => {
       handlers = h;
     },
-    ...(withRaw ? { onRawEvent: (name: string, fn: (arg: unknown) => unknown) => void raw.set(name, fn) } : {}),
+    ...(withRaw ? { onRawEvent: (name: string, fn: Fn) => void raw.set(name, fn) } : {}),
   } as unknown as LarkChannel;
   return { channel, handlers: () => handlers, raw };
 }
+/* eslint-enable @typescript-eslint/no-explicit-any */
 
 function sinks(): ChannelEventSinks {
   return {
