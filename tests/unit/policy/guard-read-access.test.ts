@@ -136,6 +136,11 @@ describe('guest runs: writes after cd into a read-only place', () => {
     ],
     ['then cd elsewhere and write', `cd ${READ_ONLY} && cd /tmp && touch x`],
     ['reading only', `cd ${READ_ONLY} && git log -3 && cat a.c`],
+    // 主人 11-20：fetch 只动 .git 里的远程跟踪分支，不算写。
+    ['fetching', `cd ${READ_ONLY} && git fetch -q origin dev 2>&1 | tail -2; git log -1 origin/dev`],
+    ['fetching all with prune', `git -C ${READ_ONLY} fetch --all --prune --tags`],
+    ['fetching by url', `cd ${READ_ONLY} && git fetch https://github.com/a/b.git dev && git fetch git@github.com:a/b.git`],
+    ['remote update', `cd ${READ_ONLY} && git remote update`],
   ])('allows %s', (_label, command) => {
     expect(bash(command).code).toBe(0);
   });
@@ -145,6 +150,13 @@ describe('guest runs: writes after cd into a read-only place', () => {
     ['making a directory there', `cd ${READ_ONLY} && mkdir -p sub`],
     ['copying into it', `cd ${READ_ONLY} && cp /tmp/a .`],
     ['pulling', `cd ${READ_ONLY} && git pull -q`],
+    ['fetching into a local branch', `cd ${READ_ONLY} && git fetch origin dev:dev`],
+    ['force-fetching a refspec', `cd ${READ_ONLY} && git fetch origin +dev`],
+    ['fetching with upload-pack', `cd ${READ_ONLY} && git fetch --upload-pack='touch /tmp/x' origin`],
+    ['fetching with a config override', `cd ${READ_ONLY} && git -c core.sshCommand='sh -c x' fetch`],
+    ['fetching with update-head-ok', `cd ${READ_ONLY} && git fetch -u origin`],
+    ['fetching with set-upstream', `cd ${READ_ONLY} && git fetch --set-upstream origin dev`],
+    ['checking out', `cd ${READ_ONLY} && git fetch && git checkout dev`],
     ['redirecting into it', `cd ${READ_ONLY} && echo x > out.txt`],
     ['editing in place', `cd ${READ_ONLY} && sed -i '' 's/a/b/' a.c`],
   ])('refuses %s', (_label, command) => {
@@ -268,7 +280,7 @@ describe('guest runs: writing from inside a read-only root', () => {
     ['cd as an if condition', `if cd ${READ_ONLY}; then touch x; fi`],
     ['builtin cd', `builtin cd ${READ_ONLY} && touch x`],
     ['command cd', `command cd ${READ_ONLY} && touch x`],
-    ['git fetch in a loop body', `cd ${READ_ONLY} && echo 1 | while read n; do git fetch -q origin; done`],
+    ['git pull in a loop body', `cd ${READ_ONLY} && echo 1 | while read n; do git pull -q origin; done`],
     ['git archive -o into it', `cd ${READ_ONLY} && git archive -o out.tar HEAD`],
     ['a subshell cd elsewhere does not move the outer shell', `cd ${READ_ONLY} && (cd /tmp && ls) && touch x`],
   ])('refuses %s', (_label, command) => {

@@ -200,6 +200,21 @@ function isRefListing(words, writeLong, writeShort) {
   return names === 0 || listing;
 }
 
+/**
+ * `git fetch` only moves remote-tracking refs and objects under `.git`; the
+ * checkout, local branches and config stay as they are (主人 11-20：fetch 不算写).
+ * Not plain: a refspec with `:` or `+` (writes local branches), `--refmap`,
+ * `--set-upstream` (config), `--update-head-ok`, and `--upload-pack` (runs a command).
+ */
+function isPlainFetch(words) {
+  return !words.some(
+    (w) =>
+      /^--(?:upload-pack|refmap|set-upstream|update-head-ok)(?:=|$)/.test(w) ||
+      /^-[a-zA-Z]*u/.test(w) ||
+      (!w.startsWith('-') && (w.includes(':') || w.startsWith('+')) && !/^[a-z][\w+.-]*:\/\//.test(w) && !/^[\w.-]+@[\w.-]+:/.test(w)),
+  );
+}
+
 /** Read-only forms of git subcommands that can also write. */
 function isGitListing(sub, rest) {
   const words = rest
@@ -209,7 +224,10 @@ function isGitListing(sub, rest) {
   const plain = words.filter((w) => !w.startsWith('-'));
   switch (sub) {
     case 'remote':
+      if (plain[0] === 'update') return isPlainFetch(words.slice(words.indexOf('update') + 1));
       return plain.length === 0 || ['get-url', 'show'].includes(plain[0]);
+    case 'fetch':
+      return isPlainFetch(words);
     case 'stash':
       return ['list', 'show'].includes(plain[0]);
     case 'archive':
@@ -242,7 +260,10 @@ function isGitListing(sub, rest) {
 function isGitRead(trimmed) {
   if (GIT_READ.test(trimmed)) return true;
   const call = trimmed.match(GIT_CALL);
-  return Boolean(call) && isGitListing(call[1], call[2]);
+  if (!call) return false;
+  // `git -c core.sshCommand=… fetch` runs a command: fetch only without `-c`.
+  if (['fetch', 'remote'].includes(call[1]) && /\sgit\s+(?:\S+\s+)*?-c\s/.test(` ${trimmed.slice(0, trimmed.length - call[2].length)}`)) return false;
+  return isGitListing(call[1], call[2]);
 }
 
 function isWriteVerb(trimmed) {
