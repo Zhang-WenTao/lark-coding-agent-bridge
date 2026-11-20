@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { paths } from '../config/paths';
 import { log } from '../core/logger';
-import { writeFileAtomic } from '../platform/atomic-write';
+import { JsonFile } from '../platform/json-file';
 import { isAlive } from './registry';
 
 /**
@@ -86,28 +86,33 @@ export async function readRunRecords(path: string): Promise<RunRecord[]> {
  */
 export class RunRegistry {
   private data: RunMap = {};
-  private saving: Promise<void> = Promise.resolve();
-  private readonly path: string;
+  private readonly file: JsonFile;
   private readonly pid: number;
 
   constructor(path: string = paths.runsFile, pid: number = process.pid) {
-    this.path = path;
     this.pid = pid;
+    this.file = new JsonFile(path, {
+      mode: 0o600,
+      onLoadError: (err, movedTo) => {
+        log.warn('run-registry', 'load-failed', { err: String(err), ...(movedTo ? { movedTo } : {}) });
+        this.data = {};
+      },
+      onPersistError: (err) => log.fail('run-registry', err, { step: 'persist' }),
+    });
   }
 
   async load(): Promise<void> {
-    try {
-      const text = await readFile(this.path, 'utf8');
-      const raw = JSON.parse(text) as Record<string, unknown>;
+    const raw = await this.file.load();
+    if (raw === undefined) return;
+    if (!raw || typeof raw !== 'object') {
+      log.warn('run-registry', 'load-failed', { err: 'not an object' });
       this.data = {};
-      for (const [runId, entry] of Object.entries(raw)) {
-        if (!isRunRecord(entry)) continue;
-        this.data[runId] = entry;
-      }
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
-      log.warn('run-registry', 'load-failed', { err: String(err) });
-      this.data = {};
+      return;
+    }
+    this.data = {};
+    for (const [runId, entry] of Object.entries(raw)) {
+      if (!isRunRecord(entry)) continue;
+      this.data[runId] = entry;
     }
   }
 
@@ -169,19 +174,11 @@ export class RunRegistry {
   }
 
   async flush(): Promise<void> {
-    await this.saving;
+    await this.file.flush();
   }
 
   private schedulePersist(): void {
-    const snapshot = { ...this.data };
-    this.saving = this.saving
-      .then(async () => {
-        await writeFileAtomic(this.path, `${JSON.stringify(snapshot, null, 2)}\n`, {
-          mode: 0o600,
-        });
-      })
-      .catch((err: unknown) => {
-        log.fail('run-registry', err, { step: 'persist' });
-      });
+    // Records are replaced, never mutated, so serialising now equals serialising the shallow copy later.
+    this.file.write(`${JSON.stringify(this.data, null, 2)}\n`);
   }
 }

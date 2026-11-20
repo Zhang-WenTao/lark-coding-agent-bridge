@@ -6,6 +6,10 @@ import { ModelPinStore } from '../../../src/agent/model-pin.js';
 import { CodeSnippetStore } from '../../../src/card/code-snippets.js';
 import { NoteExposure } from '../../../src/knowledge/exposure.js';
 import { JobStore } from '../../../src/scheduler/store.js';
+import { AutoResumer } from '../../../src/bot/auto-resume.js';
+import { ChatContextCursorStore } from '../../../src/bot/chat-context.js';
+import { RunRegistry } from '../../../src/runtime/run-registry.js';
+import { UsageLedger } from '../../../src/runtime/usage-ledger.js';
 
 // Stores on JsonFile: a file that is not JSON is moved aside at load (the
 // store starts empty, as before) so the next save cannot overwrite the only copy.
@@ -36,6 +40,39 @@ describe('JSON state stores keep a corrupt file instead of overwriting it', () =
         touchSave: () => void s.remove('none'),
       };
     }],
+    ['usage-ledger', (p) => {
+      const s = new UsageLedger(p);
+      return {
+        load: () => s.load(),
+        flush: () => s.flush(),
+        touchSave: () => s.record({ actorId: 'a', source: 'im', scopeId: 's', usage: { type: 'usage', inputTokens: 1 } as never }),
+      };
+    }],
+    ['run-registry', (p) => {
+      const s = new RunRegistry(p, 1);
+      return {
+        load: () => s.load(),
+        flush: () => s.flush(),
+        touchSave: () => s.start({ runId: 'r', scope: 's', chatId: 'c', originMessageId: 'm', promptPreview: 'p', startedAt: 1 }),
+      };
+    }],
+    ['chat-context-cursor', (p) => {
+      const s = new ChatContextCursorStore(p);
+      return { load: () => s.load(), flush: () => s.flush(), touchSave: () => s.advance('scope', 5) };
+    }],
+    ['auto-resume', (p) => {
+      const s = new AutoResumer({ file: p, fire: async () => {} });
+      let pending: Promise<void> = Promise.resolve();
+      return {
+        load: () => s.load(),
+        flush: () => pending,
+        touchSave: () => {
+          pending = s.schedule({
+            scope: 's', chatId: 'c', chatType: 'p2p', senderId: 'u', originMessageId: 'm', resumeAt: 1, attempt: 1, createdAt: 1,
+          });
+        },
+      };
+    }],
   ];
 
   for (const [name, make] of cases) {
@@ -55,4 +92,12 @@ describe('JSON state stores keep a corrupt file instead of overwriting it', () =
       expect(await readFile(join(dir, moved!), 'utf8')).toBe('{not json');
     });
   }
+
+  it('auto-resume still rejects on an unreadable (non-ENOENT) file', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'json-store-'));
+    dirs.push(dir);
+    // A directory where the file should be: readFile fails with EISDIR, which must not be swallowed.
+    const s = new AutoResumer({ file: dir, fire: async () => {} });
+    await expect(s.load()).rejects.toThrow();
+  });
 });

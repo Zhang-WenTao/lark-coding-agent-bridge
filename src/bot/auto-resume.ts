@@ -1,6 +1,5 @@
-import { readFile } from 'node:fs/promises';
 import { log } from '../core/logger';
-import { writeFileAtomic } from '../platform/atomic-write';
+import { JsonFile } from '../platform/json-file';
 import { formatMoment, runStrings, type Locale } from '../card/i18n';
 import { limitLabel as cardLimitLabel } from '../card/pause-notice';
 import type { RunLimit } from '../card/run-state';
@@ -97,29 +96,32 @@ export class AutoResumer {
   /** Attempt number of the resume that last fired per scope, to chain retries. */
   private readonly fired = new Map<string, number>();
   private timer: NodeJS.Timeout | undefined;
-  private saving: Promise<void> = Promise.resolve();
+  private readonly file: JsonFile;
   private readonly now: () => number;
 
   constructor(private readonly opts: AutoResumerOptions) {
     this.now = opts.now ?? Date.now;
+    this.file = new JsonFile(opts.file, {
+      mode: 0o600,
+      onLoadError: (err, movedTo) => {
+        // An unreadable file still aborts the load; only unparseable content is tolerated.
+        if (!(err instanceof SyntaxError)) throw err;
+        log.warn('auto-resume', 'load-failed', { err: String(err), ...(movedTo ? { movedTo } : {}) });
+      },
+      onPersistError: (err) => log.warn('auto-resume', 'persist-failed', { err: String(err) }),
+    });
   }
 
   async load(): Promise<void> {
     if (!this.opts.file) return;
-    let text: string;
-    try {
-      text = await readFile(this.opts.file, 'utf8');
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
-      throw err;
-    }
-    try {
-      const parsed = JSON.parse(text) as Partial<ResumeFile>;
+    const parsed = (await this.file.load()) as Partial<ResumeFile> | undefined;
+    if (parsed === undefined) return;
+    if (parsed && typeof parsed === 'object') {
       for (const [scope, entry] of Object.entries(parsed.resumes ?? {})) {
         if (isPendingResume(entry)) this.resumes.set(scope, entry);
       }
-    } catch (err) {
-      log.warn('auto-resume', 'load-failed', { err: String(err) });
+    } else {
+      log.warn('auto-resume', 'load-failed', { err: 'not an object' });
     }
     if (this.resumes.size > 0) log.info('auto-resume', 'loaded', { count: this.resumes.size });
   }
@@ -186,14 +188,10 @@ export class AutoResumer {
   }
 
   private persist(): Promise<void> {
-    const file = this.opts.file;
-    if (!file) return Promise.resolve();
+    if (!this.opts.file) return Promise.resolve();
     const data: ResumeFile = { resumes: Object.fromEntries(this.resumes) };
-    this.saving = this.saving
-      .catch(() => {})
-      .then(() => writeFileAtomic(file, `${JSON.stringify(data, null, 2)}\n`, { mode: 0o600 }))
-      .catch((err) => log.warn('auto-resume', 'persist-failed', { err: String(err) }));
-    return this.saving;
+    this.file.write(`${JSON.stringify(data, null, 2)}\n`);
+    return this.file.flush();
   }
 }
 

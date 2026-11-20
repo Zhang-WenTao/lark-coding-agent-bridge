@@ -1,7 +1,6 @@
-import { readFile } from 'node:fs/promises';
 import type { AgentEvent } from '../agent/types';
 import { log } from '../core/logger';
-import { writeFileAtomic } from '../platform/atomic-write';
+import { JsonFile } from '../platform/json-file';
 import { formatLocalDate } from '../core/time-format';
 
 export interface UsageTotals {
@@ -72,22 +71,21 @@ export function localDayKey(at: number): string {
  */
 export class UsageLedger {
   private data: LedgerData = { version: 1, days: {}, names: {} };
-  private saving: Promise<void> = Promise.resolve();
-  private readonly path: string;
+  private readonly file: JsonFile;
 
   constructor(path: string) {
-    this.path = path;
+    this.file = new JsonFile(path, {
+      mode: 0o600,
+      onLoadError: (err, movedTo) => log.warn('usage-ledger', 'load-failed', { err: String(err), ...(movedTo ? { movedTo } : {}) }),
+      onPersistError: (err) => log.warn('usage-ledger', 'persist-failed', { err: String(err) }),
+    });
   }
 
   async load(): Promise<void> {
-    try {
-      const raw = JSON.parse(await readFile(this.path, 'utf8')) as Partial<LedgerData>;
-      if (raw && raw.version === 1 && raw.days && typeof raw.days === 'object') {
-        this.data = { version: 1, days: raw.days, names: raw.names ?? {} };
-      }
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
-      log.warn('usage-ledger', 'load-failed', { err: String(err) });
+    const raw = (await this.file.load()) as Partial<LedgerData> | undefined;
+    if (!raw || typeof raw !== 'object') return;
+    if (raw.version === 1 && raw.days && typeof raw.days === 'object') {
+      this.data = { version: 1, days: raw.days, names: raw.names ?? {} };
     }
   }
 
@@ -139,7 +137,7 @@ export class UsageLedger {
   }
 
   async flush(): Promise<void> {
-    await this.saving;
+    await this.file.flush();
   }
 
   private prune(now: number): void {
@@ -150,10 +148,7 @@ export class UsageLedger {
   }
 
   private schedulePersist(): void {
-    const snapshot = JSON.stringify(this.data);
-    this.saving = this.saving
-      .then(() => writeFileAtomic(this.path, snapshot, { mode: 0o600 }))
-      .catch((err) => log.warn('usage-ledger', 'persist-failed', { err: String(err) }));
+    this.file.write(JSON.stringify(this.data));
   }
 }
 

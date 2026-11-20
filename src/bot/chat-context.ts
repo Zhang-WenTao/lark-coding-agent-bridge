@@ -1,8 +1,7 @@
-import { readFile } from 'node:fs/promises';
 import type { ApiMessageItem, LarkChannel } from '@larksuite/channel';
 import type { BridgePromptChatContextWindow } from '../agent/prompt';
 import { log } from '../core/logger';
-import { writeFileAtomic } from '../platform/atomic-write';
+import { JsonFile } from '../platform/json-file';
 import { fetchSubTreeItems, normalizeItemToQuoted, preExpandInteractive, type QuotedContext } from './quote';
 
 /**
@@ -277,28 +276,33 @@ const CURSOR_MAX_AGE_MS = 90 * 24 * 60 * 60_000;
  */
 export class ChatContextCursorStore {
   private data: CursorMap = {};
-  private saving: Promise<void> = Promise.resolve();
-  private readonly path: string | undefined;
+  private readonly file: JsonFile;
 
   constructor(path?: string) {
-    this.path = path;
+    this.file = new JsonFile(path, {
+      mode: 0o600,
+      onLoadError: (err, movedTo) => {
+        log.warn('chat-context', 'cursor-load-failed', { err: String(err), ...(movedTo ? { movedTo } : {}) });
+        this.data = {};
+      },
+      onPersistError: (err) => log.warn('chat-context', 'cursor-persist-failed', { err: String(err) }),
+    });
   }
 
   async load(now: number = Date.now()): Promise<void> {
-    if (!this.path) return;
-    try {
-      const raw = JSON.parse(await readFile(this.path, 'utf8')) as Record<string, unknown>;
+    const raw = await this.file.load();
+    if (raw === undefined) return;
+    if (!raw || typeof raw !== 'object') {
+      log.warn('chat-context', 'cursor-load-failed', { err: 'not an object' });
       this.data = {};
-      for (const [scope, entry] of Object.entries(raw)) {
-        const at = (entry as { lastSeenAt?: unknown } | null)?.lastSeenAt;
-        if (typeof at === 'number' && Number.isFinite(at) && now - at < CURSOR_MAX_AGE_MS) {
-          this.data[scope] = { lastSeenAt: at };
-        }
+      return;
+    }
+    this.data = {};
+    for (const [scope, entry] of Object.entries(raw)) {
+      const at = (entry as { lastSeenAt?: unknown } | null)?.lastSeenAt;
+      if (typeof at === 'number' && Number.isFinite(at) && now - at < CURSOR_MAX_AGE_MS) {
+        this.data[scope] = { lastSeenAt: at };
       }
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
-      log.warn('chat-context', 'cursor-load-failed', { err: String(err) });
-      this.data = {};
     }
   }
 
@@ -316,15 +320,10 @@ export class ChatContextCursorStore {
   }
 
   async flush(): Promise<void> {
-    await this.saving;
+    await this.file.flush();
   }
 
   private schedulePersist(): void {
-    if (!this.path) return;
-    const path = this.path;
-    const snapshot = JSON.stringify(this.data);
-    this.saving = this.saving
-      .then(() => writeFileAtomic(path, snapshot, { mode: 0o600 }))
-      .catch((err) => log.warn('chat-context', 'cursor-persist-failed', { err: String(err) }));
+    this.file.write(JSON.stringify(this.data));
   }
 }
