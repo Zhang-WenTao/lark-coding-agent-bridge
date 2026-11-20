@@ -29,6 +29,7 @@ import type { WorkspaceStore } from '../workspace/store';
 import { describeCron } from './cron';
 import { jobTitleMd, type JobRunRecord, type ScheduledJob } from './types';
 import { formatDateTime } from '../core/time-format';
+import { scopeKey } from '../core/scope-key';
 
 export interface JobRunnerDeps {
   channel: LarkChannel;
@@ -298,7 +299,7 @@ async function buildJobPrompt(
   // Chat memory is keyed by the *originating* chat's scope, not the job's own
   // `cron:<id>` scope — the job should inherit what that conversation taught
   // the bot, which is where it was created.
-  const originScope = job.threadId ? `${job.chatId}:${job.threadId}` : job.chatId;
+  const originScope = scopeKey(job.chatId, job.threadId);
   // A job the owner set up in their own private chat sees what that chat sees.
   const ownerPrivate = job.chatType === 'p2p' && isCreator(deps.controls, job.creatorId);
   const knowledge = store

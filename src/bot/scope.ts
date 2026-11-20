@@ -1,5 +1,8 @@
 import type { LarkChannel, NormalizedMessage } from '@larksuite/channel';
 import type { ChatModeCache } from './chat-mode-cache';
+import { scopeKey } from '../core/scope-key';
+
+export { scopeKey };
 
 /**
  * Compute the **session scope** for a message.
@@ -22,7 +25,7 @@ export async function scopeFor(
 ): Promise<string> {
   const mode = await cache.resolve(channel, chatId);
   if (mode === 'topic' && threadId) {
-    return `${chatId}:${threadId}`;
+    return scopeKey(chatId, threadId);
   }
   return chatId;
 }

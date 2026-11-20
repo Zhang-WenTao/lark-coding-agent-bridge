@@ -1,6 +1,7 @@
 import { readdir, readFile, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { log } from '../core/logger';
+import { scopeKey } from './scope';
 
 /**
  * A task to start in a conversation without waiting for anyone to write in
@@ -140,5 +141,5 @@ export function parseKickoff(text: string): Kickoff | undefined {
 
 /** The session scope the kickoff runs in — the same one a reply there would land in. */
 export function kickoffScope(kickoff: Kickoff): string {
-  return kickoff.threadId ? `${kickoff.chatId}:${kickoff.threadId}` : kickoff.chatId;
+  return scopeKey(kickoff.chatId, kickoff.threadId);
 }

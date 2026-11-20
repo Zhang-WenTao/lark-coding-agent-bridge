@@ -14,6 +14,7 @@ import type { SessionCatalog } from '../session/catalog';
 import type { SessionStore } from '../session/store';
 import type { WorkspaceStore } from '../workspace/store';
 import { commandSessionCatalogIdentity } from './session-catalog-identity';
+import { scopeKey } from './scope';
 import { lookupMessageThreadId } from './thread-id';
 
 /** Marker key on a button's value object that flags the cardAction as
@@ -234,7 +235,7 @@ async function resolveScope(
     // scope than fail the click silently.
     return { scope: chatId, threadId: undefined, mode, isP2p };
   }
-  return { scope: `${chatId}:${threadId}`, threadId, mode: 'topic', isP2p };
+  return { scope: scopeKey(chatId, threadId), threadId, mode: 'topic', isP2p };
 }
 
 function forwardToAgent(

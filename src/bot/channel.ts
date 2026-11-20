@@ -78,6 +78,7 @@ import { overloadCard } from '../card/templates';
 import { botOwnersOf, BotOverloadGuard, isBotOnlyBatch, isOverloadExempt } from './bot-overload';
 import { fireAndForget } from '../core/fire-and-forget';
 import { notifyCorruptStateFiles } from './state-file-notice';
+import { scopeKey } from './scope';
 import { log, redactDiagnosticText, reportMetric, withTrace } from '../core/logger';
 import { MediaCache, type LocalAttachment } from '../media/cache';
 import {
@@ -1360,7 +1361,7 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     });
   }
   const scope = chatMode === 'topic' && threadId
-    ? `${msg.chatId}:${threadId}`
+    ? scopeKey(msg.chatId, threadId)
     : msg.chatId;
   log.info('intake', 'enter', {
     scope,
@@ -1677,7 +1678,7 @@ async function openTopicFor(
   });
   if (!opened) return undefined;
   const { threadId, openerId } = opened;
-  const topicScope = threadId ? `${msg.chatId}:${threadId}` : undefined;
+  const topicScope = threadId ? scopeKey(msg.chatId, threadId) : undefined;
   // The opener card is the topic's progress card to be; until a run takes it, it is held for the topic.
   holdTopicOpener(topicScope ?? `opener:${openerId}`, { messageId: openerId, title, fallbackText });
   if (!threadId || !topicScope) {
