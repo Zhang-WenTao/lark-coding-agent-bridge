@@ -2308,7 +2308,32 @@ async function prepareBatchPrompt(
   };
 }
 
-async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
+/**
+ * Submit a batch's run and set up everything its reply needs: where it
+ * replies, the session and run records, the idle watchdog, the reply mode
+ * and render options, and the follow-up for background turns.
+ * Undefined: the run was refused (the refusal has been sent).
+ */
+async function submitBatchRun(
+  deps: RunBatchDeps,
+  input: Pick<
+    Parameters<typeof prepareBatchPrompt>[1],
+    'firstMsg' | 'chatId' | 'threadId' | 'attachments' | 'quotes' | 'modelPin' | 'autoEffortPlan'
+  > &
+    Pick<
+      Awaited<ReturnType<typeof prepareBatchPrompt>>,
+      | 'contextUntilMs'
+      | 'agentKind'
+      | 'modelPref'
+      | 'requestedModel'
+      | 'smartSession'
+      | 'ownerRun'
+      | 'restrictedCwd'
+      | 'runGuard'
+      | 'knowledgeDedupe'
+      | 'prompt'
+    > & { lastMsg: NormalizedMessage; run: BatchRunState },
+) {
   const {
     channel,
     executor,
@@ -2317,7 +2342,6 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     workspaces,
     batch,
     controls,
-    cotClient,
     callbackAuth,
     activePolicyFingerprints,
     pendingRotations,
@@ -2328,45 +2352,27 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     runs,
     autoResumer,
   } = deps;
-  if (batch.length === 0) return;
-  const firstMsg = batch[0];
-  const lastMsg = batch[batch.length - 1];
-  if (!firstMsg || !lastMsg) return;
-
-  const chatId = firstMsg.chatId;
-  const threadId = firstMsg.threadId;
-
-  if (await stopForBotOverload(deps, { chatId, threadId, lastMsg })) return;
-
-  const { attachments, batchIds, quoteTargets, quotes } = await resolveBatchInputs(deps);
-
-  const { modelPin, autoEffortPlan } = planBatchAutoEffort(deps, { chatId, attachments, quotes });
-  const run: BatchRunState = { backgroundSettled: false, answerIsNewMessage: false };
-
   const {
+    firstMsg,
+    lastMsg,
+    chatId,
+    threadId,
+    attachments,
+    quotes,
+    modelPin,
+    autoEffortPlan,
+    run,
     contextUntilMs,
     agentKind,
     modelPref,
     requestedModel,
     smartSession,
-    waitingOrigins,
     ownerRun,
     restrictedCwd,
     runGuard,
     knowledgeDedupe,
     prompt,
-  } = await prepareBatchPrompt(deps, {
-    firstMsg,
-    chatId,
-    threadId,
-    attachments,
-    batchIds,
-    quoteTargets,
-    quotes,
-    modelPin,
-    autoEffortPlan,
-  });
-
+  } = input;
   // For topic groups: thread the reply so it lands in the same topic as the
   // user's message. Otherwise the SDK posts at top level and the user's
   // topic discussion breaks visually.
@@ -2484,7 +2490,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       code: flow.rejectReason.code,
     });
     await channel.send(chatId, { markdown: flow.rejectReason.userVisible }, sendOpts);
-    return;
+    return undefined;
   }
 
   const { execution, cwdRealpath: cwd } = flow;
@@ -2733,6 +2739,125 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     run.backgroundSettled = true;
     await settleWaiting(turn.kind === 'stopped' ? 'stopped' : 'done');
   };
+  return {
+    sendOpts,
+    separateFinalReply,
+    runSubmittedAt,
+    execution,
+    handle,
+    supplementTarget,
+    eventStream,
+    recordSession,
+    idleTimeoutMs,
+    replyMode,
+    cotMessages,
+    cotEnabled,
+    resumeAttempt,
+    canAutoResume,
+    locale,
+    filterForPrefs,
+    cardRenderOptions,
+    here,
+    settleWaiting,
+  };
+}
+
+async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
+  const {
+    channel,
+    batch,
+    controls,
+    cotClient,
+    activePolicyFingerprints,
+    pendingRotations,
+    backgroundOrigins,
+    scope,
+    mode,
+    runs,
+    autoResumer,
+  } = deps;
+  if (batch.length === 0) return;
+  const firstMsg = batch[0];
+  const lastMsg = batch[batch.length - 1];
+  if (!firstMsg || !lastMsg) return;
+
+  const chatId = firstMsg.chatId;
+  const threadId = firstMsg.threadId;
+
+  if (await stopForBotOverload(deps, { chatId, threadId, lastMsg })) return;
+
+  const { attachments, batchIds, quoteTargets, quotes } = await resolveBatchInputs(deps);
+
+  const { modelPin, autoEffortPlan } = planBatchAutoEffort(deps, { chatId, attachments, quotes });
+  const run: BatchRunState = { backgroundSettled: false, answerIsNewMessage: false };
+
+  const {
+    contextUntilMs,
+    agentKind,
+    modelPref,
+    requestedModel,
+    smartSession,
+    waitingOrigins,
+    ownerRun,
+    restrictedCwd,
+    runGuard,
+    knowledgeDedupe,
+    prompt,
+  } = await prepareBatchPrompt(deps, {
+    firstMsg,
+    chatId,
+    threadId,
+    attachments,
+    batchIds,
+    quoteTargets,
+    quotes,
+    modelPin,
+    autoEffortPlan,
+  });
+
+  const started = await submitBatchRun(deps, {
+    firstMsg,
+    lastMsg,
+    chatId,
+    threadId,
+    attachments,
+    quotes,
+    modelPin,
+    autoEffortPlan,
+    run,
+    contextUntilMs,
+    agentKind,
+    modelPref,
+    requestedModel,
+    smartSession,
+    ownerRun,
+    restrictedCwd,
+    runGuard,
+    knowledgeDedupe,
+    prompt,
+  });
+  if (!started) return;
+  const {
+    sendOpts,
+    separateFinalReply,
+    runSubmittedAt,
+    execution,
+    handle,
+    supplementTarget,
+    eventStream,
+    recordSession,
+    idleTimeoutMs,
+    replyMode,
+    cotMessages,
+    cotEnabled,
+    resumeAttempt,
+    canAutoResume,
+    locale,
+    filterForPrefs,
+    cardRenderOptions,
+    here,
+    settleWaiting,
+  } = started;
 
   // Add a "Typing" reaction to the triggering message as an instant ack that
   // the bot noticed it, never letting that outbound API call block agent
