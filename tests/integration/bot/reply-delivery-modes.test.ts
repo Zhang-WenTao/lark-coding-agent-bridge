@@ -1,0 +1,323 @@
+import type { NormalizedMessage } from '@larksuite/channel';
+import { realpath } from 'node:fs/promises';
+import { join } from 'node:path';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { AgentEvent } from '../../../src/agent/types.js';
+import type { AutoResumer } from '../../../src/bot/auto-resume.js';
+import { createDefaultProfileConfig } from '../../../src/config/profile-schema.js';
+import { SessionStore } from '../../../src/session/store.js';
+import { WorkspaceStore } from '../../../src/workspace/store.js';
+import { FakeAgentAdapter } from '../../helpers/fake-agent.js';
+import { createTmpProfile } from '../../helpers/tmp-profile.js';
+
+/**
+ * Characterisation of how a finished run's reply reaches the chat, for each
+ * reply mode (CoT / card / markdown / text) in a plain chat and in a topic.
+ * Written before reply delivery moved out of channel.ts, as the safety net
+ * for that move: it pins what goes out (stream or message, where it is
+ * threaded, the reactions, the session scope), not how it is produced.
+ */
+
+const sdkMock = vi.hoisted(() => ({
+  channel: undefined as FakeLarkChannel | undefined,
+  createLarkChannel: vi.fn(() => {
+    if (!sdkMock.channel) throw new Error('fake channel not configured');
+    return sdkMock.channel;
+  }),
+}));
+
+vi.mock('@larksuite/channel', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@larksuite/channel')>();
+  return {
+    ...actual,
+    createLarkChannel: sdkMock.createLarkChannel,
+  };
+});
+
+import { startChannel } from '../../../src/bot/channel.js';
+
+type Mode = 'cot' | 'card' | 'markdown' | 'text';
+type Where = 'p2p' | 'topic';
+
+interface StreamCall {
+  chatId: string;
+  kind: 'card' | 'markdown';
+  options: unknown;
+  /** Every card / markdown body the producer rendered, in order. */
+  renders: string[];
+}
+
+interface FakeLarkChannel {
+  botIdentity: { openId: string; name: string };
+  handlers: { message?: (msg: NormalizedMessage) => Promise<void> | void };
+  sent: Array<{ chatId: string; content: unknown; options?: unknown }>;
+  streams: StreamCall[];
+  reactions: Array<{ messageId: string; emoji: string }>;
+  rawClient: Record<string, unknown>;
+  on(handlers: FakeLarkChannel['handlers']): void;
+  connect(): Promise<void>;
+  disconnect(): Promise<void>;
+  getChatMode(chatId: string): Promise<'p2p' | 'group' | 'topic'>;
+  getConnectionStatus(): { state: 'connected'; reconnectAttempts: number };
+  send(chatId: string, content: unknown, options?: unknown): Promise<{ messageId: string }>;
+  stream(chatId: string, input: unknown, options?: unknown): Promise<{ messageId: string }>;
+  updateCard: ReturnType<typeof vi.fn>;
+  recallMessage: ReturnType<typeof vi.fn>;
+  addReaction(messageId: string, emojiType: string): Promise<string>;
+  removeReaction(messageId: string, reactionId: string): Promise<void>;
+}
+
+const ANSWER = 'ANSWER_BODY_42';
+
+const RUN_EVENTS: AgentEvent[] = [
+  { type: 'system', sessionId: 'sess-1' },
+  { type: 'text', delta: ANSWER },
+  { type: 'done', terminationReason: 'normal' },
+];
+
+const cleanups: Array<() => Promise<void>> = [];
+
+afterEach(async () => {
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+  sdkMock.channel = undefined;
+  sdkMock.createLarkChannel.mockClear();
+  await Promise.all(cleanups.splice(0).map((cleanup) => cleanup()));
+});
+
+const CASES: Array<{ mode: Mode; where: Where }> = (['cot', 'card', 'markdown', 'text'] as const).flatMap((mode) =>
+  (['p2p', 'topic'] as const).map((where) => ({ mode, where })),
+);
+
+describe('reply delivery by mode', () => {
+  it.each(CASES)('$mode reply in a $where chat', async ({ mode, where }) => {
+    const h = await startHarness(mode, where);
+    const msg = where === 'topic' ? topicMessage('om_q') : p2pMessage('om_q');
+    const scope = where === 'topic' ? 'oc_topic:omt_1' : 'oc_dm';
+    const threaded = where === 'topic' ? { replyInThread: true } : {};
+
+    await h.channel.handlers.message?.(msg);
+    await waitFor(() => h.channel.reactions.some((r) => r.emoji === 'DONE'));
+    // Let any (unwanted) duplicate delivery fire before asserting.
+    await new Promise((resolve) => setTimeout(resolve, 80));
+
+    // The run resumed nothing and recorded its session under the scope.
+    expect(h.agent.runOptions).toHaveLength(1);
+    expect(h.sessions.getRaw(scope)?.sessionId).toBe('sess-1');
+
+    // The working reaction is the ack in every mode but CoT (it has its own bubble).
+    const emojis = h.channel.reactions.filter((r) => r.messageId === 'om_q').map((r) => r.emoji);
+    expect(emojis).toEqual(mode === 'cot' ? ['DONE'] : ['Typing', 'DONE']);
+
+    const chatId = msg.chatId;
+    if (mode === 'card' || mode === 'markdown') {
+      // Streamed into one progress message that ends holding the answer; nothing else is sent.
+      expect(h.channel.streams).toHaveLength(1);
+      const stream = h.channel.streams[0]!;
+      expect(stream.chatId).toBe(chatId);
+      expect(stream.kind).toBe(mode);
+      expect(stream.options).toEqual({ replyTo: 'om_q', ...threaded });
+      expect(stream.renders.at(-1)).toContain(ANSWER);
+      expect(h.channel.sent).toEqual([]);
+    } else {
+      // One standalone reply carrying the answer; no progress stream.
+      expect(h.channel.streams).toEqual([]);
+      expect(h.channel.sent).toHaveLength(1);
+      const reply = h.channel.sent[0]!;
+      expect(reply.chatId).toBe(chatId);
+      expect(reply.options).toEqual({ replyTo: 'om_q', ...threaded });
+      expect(Object.keys(reply.content as object)).toEqual(['markdown']);
+      expect((reply.content as { markdown: string }).markdown).toContain(ANSWER);
+    }
+
+    if (mode === 'cot') {
+      // The CoT bubble is created against the chat, anchored on the question.
+      const create = h.cotRequests.find((r) => r.url.includes('/open-apis/im/v1/message_cot?receive_id_type=chat_id'));
+      expect(create).toBeDefined();
+      expect(JSON.parse(create!.body)).toMatchObject({ receive_id: chatId });
+    } else {
+      expect(h.cotRequests).toEqual([]);
+    }
+  });
+});
+
+async function startHarness(mode: Mode, where: Where): Promise<{
+  channel: FakeLarkChannel;
+  agent: FakeAgentAdapter;
+  sessions: SessionStore;
+  cotRequests: Array<{ url: string; body: string }>;
+}> {
+  const tmp = await createTmpProfile('reply-delivery-modes-');
+  const workspace = await realpath(tmp.workspace);
+  const base = createDefaultProfileConfig({
+    agentKind: 'claude',
+    accounts: { app: { id: 'cli_test', secret: 'secret', tenant: 'feishu' } },
+    access: { allowedUsers: ['ou_user'], allowedChats: ['oc_topic'] },
+    preferences: {
+      messageReply: mode === 'cot' ? 'markdown' : mode,
+      messageReplyMigrated: true,
+      ...(mode === 'cot' ? { cotMessages: 'brief' as const } : {}),
+    },
+  });
+  const profileConfig = { ...base, workspaces: { ...base.workspaces, default: workspace } };
+  const sessions = new SessionStore(join(tmp.profile, 'sessions.json'));
+  const workspaces = new WorkspaceStore(join(tmp.profile, 'workspaces.json'));
+  const agent = new FakeAgentAdapter({ events: RUN_EVENTS });
+  const channel = createFakeLarkChannel(where);
+  sdkMock.channel = channel;
+
+  // CoT talks to Feishu over plain fetch, not through the SDK channel.
+  const cotRequests: Array<{ url: string; body: string }> = [];
+  vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+    const body = typeof init?.body === 'string' ? init.body : '';
+    if (url.includes('tenant_access_token')) {
+      return jsonResponse({ code: 0, tenant_access_token: 't-token', expire: 7200 });
+    }
+    cotRequests.push({ url, body });
+    if (url.includes('message_cot?receive_id_type=chat_id')) {
+      return jsonResponse({ code: 0, data: { cot_id: 'cot_1', message_id: 'om_cot' } });
+    }
+    return jsonResponse({ code: 0, data: {} });
+  }));
+
+  const controls = {
+    profile: 'test',
+    profileConfig,
+    ownerRefreshState: 'unknown' as const,
+    async refreshOwner() {},
+    async restart() {},
+    async exit() {},
+    configPath: '/tmp/config.json',
+    cfg: profileConfig,
+    processId: 'proc_test',
+    autoResumer: undefined as AutoResumer | undefined,
+  };
+  const bridge = await startChannel({ cfg: profileConfig, agent, sessions, workspaces, controls });
+  cleanups.push(async () => {
+    await bridge.disconnect();
+    await Promise.all([sessions.flush(), workspaces.flush()]);
+    await tmp.cleanup();
+  });
+  return { channel, agent, sessions, cotRequests };
+}
+
+function jsonResponse(data: unknown): Response {
+  return new Response(JSON.stringify(data), { status: 200, headers: { 'Content-Type': 'application/json' } });
+}
+
+function createFakeLarkChannel(where: Where): FakeLarkChannel {
+  const handlers: FakeLarkChannel['handlers'] = {};
+  const sent: FakeLarkChannel['sent'] = [];
+  const streams: StreamCall[] = [];
+  const reactions: FakeLarkChannel['reactions'] = [];
+  let nextReaction = 1;
+  const channel: FakeLarkChannel = {
+    handlers,
+    sent,
+    streams,
+    reactions,
+    botIdentity: { openId: 'ou_bot', name: 'Bridge' },
+    rawClient: {
+      request: vi.fn(async () => ({ data: { items: [] } })),
+      application: {
+        v6: { application: { get: vi.fn(async () => ({ data: { app: { owner: { owner_id: 'ou_owner' } } } })) } },
+      },
+      im: {
+        v1: {
+          message: {
+            get: vi.fn(async () => ({ data: { items: [] } })),
+            list: vi.fn(async () => ({ data: { items: [], has_more: false } })),
+          },
+        },
+      },
+    },
+    on(next) {
+      Object.assign(handlers, next);
+    },
+    async connect() {},
+    async disconnect() {},
+    async getChatMode() {
+      return where === 'topic' ? 'topic' : 'p2p';
+    },
+    getConnectionStatus() {
+      return { state: 'connected', reconnectAttempts: 0 };
+    },
+    async send(chatId, content, options) {
+      sent.push({ chatId, content, options });
+      return { messageId: `om_sent_${sent.length}` };
+    },
+    async stream(chatId, input, options) {
+      const messageId = `om_stream_${streams.length + 1}`;
+      const card = (input as { card?: { initial: unknown; producer(ctrl: object): Promise<void> } }).card;
+      const markdown = (input as { markdown?: (ctrl: object) => Promise<void> }).markdown;
+      const call: StreamCall = { chatId, kind: card ? 'card' : 'markdown', options, renders: [] };
+      streams.push(call);
+      if (card) {
+        await card.producer({
+          messageId,
+          async update(next: unknown) {
+            call.renders.push(JSON.stringify(next));
+          },
+        });
+      } else if (markdown) {
+        await markdown({
+          messageId,
+          async setContent(body: string) {
+            call.renders.push(body);
+          },
+        });
+      }
+      return { messageId };
+    },
+    updateCard: vi.fn(async () => {}),
+    recallMessage: vi.fn(async () => {}),
+    async addReaction(messageId, emojiType) {
+      reactions.push({ messageId, emoji: emojiType });
+      return `reaction_${nextReaction++}`;
+    },
+    async removeReaction() {},
+  };
+  return channel;
+}
+
+function p2pMessage(messageId: string): NormalizedMessage {
+  return {
+    messageId,
+    chatId: 'oc_dm',
+    chatType: 'p2p',
+    senderId: 'ou_user',
+    senderName: 'User',
+    content: '问个问题',
+    rawContentType: 'text',
+    resources: [],
+    mentions: [],
+    mentionedBot: false,
+    createTime: 1760000001000,
+  } as unknown as NormalizedMessage;
+}
+
+function topicMessage(messageId: string): NormalizedMessage {
+  return {
+    messageId,
+    chatId: 'oc_topic',
+    chatType: 'group',
+    threadId: 'omt_1',
+    senderId: 'ou_user',
+    senderName: 'User',
+    content: '问个问题',
+    rawContentType: 'text',
+    resources: [],
+    mentions: [],
+    mentionedBot: true,
+    createTime: 1760000001000,
+  } as unknown as NormalizedMessage;
+}
+
+async function waitFor(predicate: () => boolean, timeoutMs = 5000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error('timed out waiting for async work');
+}
