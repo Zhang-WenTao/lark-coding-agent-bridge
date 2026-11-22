@@ -551,15 +551,10 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
     appId: cfg.accounts.app.id,
     appSecret,
   });
-  const threadModeOverrideWarnedChats = new Set<string>();
+  // A reply thread in a group or p2p chat is normal use, not a problem: info
+  // only (it was a once-per-chat warn, which only grew with restarts).
   const logThreadModeOverride: LogThreadModeOverride = ({ chatId, resolvedMode, threadId }) => {
-    const fields = { chatId, cachedMode: resolvedMode, threadId };
-    if (threadModeOverrideWarnedChats.has(chatId)) {
-      log.info('chat', 'mode-overridden-by-thread', fields);
-      return;
-    }
-    threadModeOverrideWarnedChats.add(chatId);
-    log.warn('chat', 'mode-overridden-by-thread', fields);
+    log.info('chat', 'mode-overridden-by-thread', { chatId, cachedMode: resolvedMode, threadId });
   };
 
   const opts: LarkChannelOptions = {
@@ -1837,6 +1832,11 @@ interface BatchRunState {
   /** A background turn already reported the work over (it can beat this run's own wrap-up). */
   backgroundSettled: boolean;
   /**
+   * The owner was already @-mentioned for this run (结果提醒主人): a background
+   * turn that beats the wrap-up must not leave the `finally` block a second @.
+   */
+  ownerNotified?: boolean;
+  /**
    * Captured from whichever reply branch actually runs, so the `finally`
    * block can decide whether to mark the triggering message "answered"
    * without needing to know which reply mode produced the run.
@@ -2650,7 +2650,8 @@ async function submitBatchRun(
     run.backgroundSettled = true;
     // 结果提醒主人: the result only now exists, so the owner's @ goes out here.
     const ownerNotifyId = ownerNotifyTarget(controls, chatId);
-    if (ownerNotifyId && turn.kind === 'turn') {
+    if (ownerNotifyId && turn.kind === 'turn' && !run.ownerNotified) {
+      run.ownerNotified = true;
       const notice = planOwnerNotice({
         ownerId: ownerNotifyId,
         terminal: 'done',
@@ -3308,7 +3309,8 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     // run @-mentions the owner with a one-line brief (instead of the long-run
     // notice). Work still running in the background reports when it ends.
     const ownerNotifyId = ownerNotifyTarget(controls, chatId);
-    if (ownerNotifyId && !(run.runTerminal === 'done' && background > 0)) {
+    if (ownerNotifyId && !run.ownerNotified && !(run.runTerminal === 'done' && background > 0)) {
+      run.ownerNotified = true;
       const notice = planOwnerNotice({
         ownerId: ownerNotifyId,
         terminal: run.runTerminal,

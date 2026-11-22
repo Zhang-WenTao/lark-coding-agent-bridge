@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { log } from '../core/logger';
 import { listDescendants, signalAll } from '../agent/process-tree';
-import { readChildLedgers, removeChildLedger, type ChildRecord } from '../platform/child-ledger';
+import { psEnv, readChildLedgers, removeChildLedger, type ChildRecord } from '../platform/child-ledger';
 import { isAlive } from './registry';
 
 /** What `ps` says about a pid right now; undefined if it is gone. */
@@ -31,6 +31,7 @@ function inspect(pid: number): ProcInfo | undefined {
     const out = execFileSync('ps', ['-o', 'ppid=', '-o', 'lstart=', '-o', 'command=', '-p', String(pid)], {
       encoding: 'utf8',
       timeout: 5000,
+      env: psEnv(),
       stdio: ['ignore', 'pipe', 'ignore'],
     }).trim();
     // "  1 Fri Nov 20 19:00:40 2026     /path/to/claude --flags"

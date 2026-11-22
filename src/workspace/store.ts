@@ -47,6 +47,12 @@ export class WorkspaceStore {
   async load(): Promise<void> {
     const loaded = await this.file.load();
     if (loaded === undefined) return;
+    // Valid JSON that is not an object (`null`, `[]`) holds no bindings: start
+    // empty instead of failing the profile on `null.chats`.
+    if (!loaded || typeof loaded !== 'object' || Array.isArray(loaded)) {
+      log.warn('workspace', 'load-failed', { err: 'not an object' });
+      return;
+    }
     const parsed = loaded as Partial<WorkspaceData>;
     this.data = {
       chats: parsed.chats ?? {},

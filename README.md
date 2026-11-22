@@ -565,7 +565,7 @@ Mode mapping:
 | `workspace` | `acceptEdits` | `workspace-write` |
 | `read-only` | `plan` | `read-only` |
 
-The legacy `sandbox` field is still readable for old configs. After the bridge saves the profile, it migrates that setting to canonical `permissions`.
+The legacy `sandbox` block is no longer read: a profile with `sandbox` but no `permissions` fails to load with a hint to rewrite it as `permissions`; a `sandbox` next to `permissions` is ignored.
 
 ## Data directories
 
@@ -585,6 +585,7 @@ The legacy `sandbox` field is still readable for old configs. After the bridge s
 | `~/.lark-channel/profiles/<profile>/logs/` | Structured run logs |
 | `~/.lark-channel/registry/processes.json` | Local process registry |
 | `~/.lark-channel/registry/locks/` | Profile and app locks |
+| `~/.lark-channel/agent-children/<pid>.json` | Agent processes each bridge process started; the next bridge stops what a crashed one left running |
 
 Set `LARK_CHANNEL_HOME=/path/to/state` to move all local bridge state. `LARK_CHANNEL_LOG_DAYS` overrides log retention.
 

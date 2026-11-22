@@ -47,6 +47,12 @@ export class SessionStore {
   async load(): Promise<void> {
     const loaded = await this.file.load();
     if (loaded === undefined) return;
+    // Valid JSON that is not an object (`null`, `[]`, `"x"`) holds no sessions:
+    // start empty instead of failing the profile on `Object.entries(null)`.
+    if (!loaded || typeof loaded !== 'object' || Array.isArray(loaded)) {
+      log.warn('session', 'load-failed', { err: 'not an object' });
+      return;
+    }
     const raw = loaded as Record<string, Partial<SessionEntry>>;
     this.data = {};
     for (const [chatId, entry] of Object.entries(raw)) {

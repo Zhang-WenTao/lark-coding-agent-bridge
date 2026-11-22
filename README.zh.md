@@ -587,7 +587,7 @@ bridge 会检查所选目录存在、是目录，并且不是 `/`、Home 根、�
 | `workspace` | `acceptEdits` | `workspace-write` |
 | `read-only` | `plan` | `read-only` |
 
-旧版 `sandbox` 字段仍可读取。bridge 保存 profile 后，会把该设置迁移为 canonical `permissions`。
+旧版 `sandbox` 写法不再读取：只有 `sandbox`、没有 `permissions` 的 profile 会加载失败，并提示改写为 `permissions`；与 `permissions` 并存的 `sandbox` 会被忽略。
 
 ## 数据目录
 
@@ -607,6 +607,7 @@ bridge 会检查所选目录存在、是目录，并且不是 `/`、Home 根、�
 | `~/.lark-channel/profiles/<profile>/logs/` | 结构化运行日志 |
 | `~/.lark-channel/registry/processes.json` | 本机进程注册表 |
 | `~/.lark-channel/registry/locks/` | profile lock 和 app lock |
+| `~/.lark-channel/agent-children/<pid>.json` | 每个 bridge 进程启动的 agent 子进程；进程异常退出后由下一个 bridge 据此清理 |
 
 设置 `LARK_CHANNEL_HOME=/path/to/state` 可以迁移整棵本地状态目录。`LARK_CHANNEL_LOG_DAYS` 可以调整日志保留天数。
 
@@ -704,13 +705,13 @@ bridge 默认一直续用同一个会话。会话越聊越长，每一轮（以�
 
 ### 自动分级（默认关闭，仅 Claude）
 
-每条聊天消息开跑前，先用一次不带工具、不续会话的 `claude -p`（默认 Opus · medium，约 3–5 秒，和拉引用、群上下文并行）判断难度，再沿档位梯子逐级升降本轮的模型和 effort。默认梯子从低到高：`medium`（Opus · medium）→ `high`（Opus · high）→ `xhigh`（Opus · xhigh）→ `fable`（Fable · xhigh，只给 bot 主人本人发起的任务）。
+每条聊天消息开跑前，先用一次不带工具、不续会话的 `claude -p`（默认 Opus · medium，约 3–5 秒，和拉引用、群上下文并行）判断难度，再沿档位梯子升降本轮的模型和 effort。默认梯子从低到高：`medium`（Opus · medium）→ `high`（Opus · high）→ `xhigh`（Opus · xhigh）→ `max`（Opus · max）。另有手动档 `fable`（Fable · xhigh，只给 bot 主人本人发起的任务）：不参与自动分级，只有消息以 `/fable` 开头时才用，之后的短跟进（「继续」）沿用它。
 
-- **新会话**：直接从判断出的档位起步，但最高只到和第一档同模型的那一档；换模型会让整段会话的 prompt 缓存失效，Fable 只能从 xhigh 逐级升上去。
-- **续聊**：每轮最多升或降一档；离开 Fable 这类换了模型的档位，要连续两轮判断都低于它。
-- **跳过判断**：消息不超过 6 个字且没有附件时（「继续」「好的」）沿用当前档，新会话则从最低档起步；消息以 `/medium`、`/high`、`/xhigh`、`/fable` 开头时直接用这一档。
+- **新会话**：直接从判断出的档位起步（可以从 `max` 起步），但不越过和第一档同模型的最高一档，也不从手动档起步。
+- **续聊**：升档直接跳到判断出的档位；降档每轮只降一档；离开换了模型的档位（自定义梯子里的非手动档），要连续两轮判断都低于它。
+- **跳过判断**：消息不超过 6 个字且没有附件时（「继续」「好的」）沿用当前档，新会话则从最低档起步；消息以 `/medium`、`/high`、`/xhigh`、`/max`、`/fable` 开头时直接用这一档。
 - **上限**：主人以外的人发起的任务，不超过该会话的 effort（`chatEffort`，没有则用 `effort`），也不用 Fable。
-- **Fable 额度**：Fable 有单独的周额度（`/usage` 里的 `Current week (Fable)`），读 `/usage` 时一并记下，`/accounts` 也会显示。本轮要用的账户这项超过 `quotaLine`（默认 90%）时不升到 Fable；读不到（如 token 账户）时不拦。
+- **Fable 额度**：Fable 有单独的周额度（`/usage` 里的 `Current week (Fable)`），读 `/usage` 时一并记下，`/accounts` 也会显示。本轮要用的账户这项超过 `quotaLine`（默认 90%）时，`/fable` 落到梯子上允许的最高档；读不到（如 token 账户）时不拦。
 - **兜底**：判断失败或超时（默认 20 秒）沿用当前档；Fable 档的运行报错后，1 小时内跳过 Fable。
 
 回复卡底部的 Effort 显示本轮档位，如 `xhigh（自动↑）`。各会话所在的档位存在 profile 目录的 `auto-effort.json`，重启不丢。配置文件里打开（profile 的 `preferences`，改完重启该 profile 生效），梯子和判断用的模型都可以改：
@@ -725,7 +726,7 @@ bridge 默认一直续用同一个会话。会话越聊越长，每一轮（以�
 }
 ```
 
-**前缀开话题**：不在话题里时，以 `/new-topic`、`/medium`、`/high`、`/xhigh`、`/fable` 开头的消息不在当前对话里跑，bot 先在这条消息下面回一条「🧵 已开话题」，把它变成一个话题，再在这个话题的独立会话里处理：档位前缀按前缀的档位跑，`/new-topic` 去掉前缀后按自动分级跑；发消息的人是话题的发起人，会自动收到话题里的回复。已经在话题里（含话题群）时就在当前话题里跑，不再开新话题。只发一个前缀、后面没有内容（也没有附件、引用）时不开话题。新话题的第一轮会附上原来那个对话（群或私聊主界面）12 小时内最近 20 条消息，「接着刚才那个查」也接得上。开话题失败时照常在原对话里跑。档位前缀依赖自动分级（档位名取自梯子），`/new-topic` 不依赖；不想要时在 `preferences` 里设 `"topicPrefix": false`。
+**前缀开话题**：不在话题里时，以 `/new-topic`、`/medium`、`/high`、`/xhigh`、`/max`、`/fable` 开头的消息不在当前对话里跑，bot 先在这条消息下面回一条「🧵 已开话题」，把它变成一个话题，再在这个话题的独立会话里处理：档位前缀按前缀的档位跑，`/new-topic` 去掉前缀后按自动分级跑；发消息的人是话题的发起人，会自动收到话题里的回复。已经在话题里（含话题群）时就在当前话题里跑，不再开新话题。只发一个前缀、后面没有内容（也没有附件、引用）时不开话题。新话题的第一轮会附上原来那个对话（群或私聊主界面）12 小时内最近 20 条消息，「接着刚才那个查」也接得上。开话题失败时照常在原对话里跑。档位前缀依赖自动分级（档位名取自梯子），`/new-topic` 不依赖；不想要时在 `preferences` 里设 `"topicPrefix": false`。
 
 ### Worktree 自动清理（默认关闭）
 

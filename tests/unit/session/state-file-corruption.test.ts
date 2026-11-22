@@ -40,6 +40,16 @@ describe('sessions.json / workspaces.json corruption', () => {
       expect(store.takeLoadProblem()).toBeUndefined();
     });
 
+    for (const body of ['null', '[]', '"x"']) {
+      it(`${name}: valid JSON that is not an object (${body}) starts empty without failing`, async () => {
+        const path = join(dir, name);
+        await writeFile(path, body);
+        const store = make(path);
+        await expect(store.load()).resolves.toBeUndefined();
+        expect(store.takeLoadProblem()).toBeUndefined();
+      });
+    }
+
     it(`${name}: an unreadable file still refuses to start and is left in place`, async () => {
       if (process.platform === 'win32' || process.getuid?.() === 0) return;
       const path = join(dir, name);

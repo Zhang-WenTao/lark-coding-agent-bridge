@@ -32,5 +32,3 @@ export async function handleCopyCode(args: string, ctx: CommandContext): Promise
 export async function handleCoffee(_args: string, ctx: CommandContext): Promise<void> {
   await ctx.channel.send(ctx.msg.chatId, { card: coffeeCard() }, commandReplyOptions(ctx));
 }
-
-// ─── git: /diff, /worktree, /pr ───────────────────────────────────────────

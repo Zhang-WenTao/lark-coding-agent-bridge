@@ -15,7 +15,8 @@ const alive = (pid: number): boolean => {
     return false;
   }
 };
-const lstart = (pid: number): string => execFileSync('ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf8' }).trim();
+const lstart = (pid: number): string =>
+  execFileSync('ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf8', env: { ...process.env, LC_ALL: 'C' } }).trim();
 const waitGone = async (pid: number): Promise<boolean> => {
   for (let i = 0; i < 50; i++) {
     if (!alive(pid)) return true;
@@ -88,6 +89,33 @@ describe.skipIf(process.platform === 'win32')('agent child ledger (process)', ()
     const reaped = await reapOrphanAgentChildren(dir, undefined, 50);
     expect(reaped[0]?.killed).toBe(false);
     expect(alive(pid)).toBe(true);
+  });
+
+  it('records and reaps under a non-English locale (ps lstart is read in the C locale)', async () => {
+    const saved = process.env.LC_ALL;
+    process.env.LC_ALL = 'zh_CN.UTF-8';
+    try {
+      const dir = tmp();
+      installChildLedger(dir, 4243);
+      const child = spawn('sleep', ['1'], { stdio: 'ignore' });
+      kids.push(child.pid!);
+      trackAgentChild(child, '/bin/sleep');
+      const file = join(dir, '4243.json');
+      const read = () => JSON.parse(readFileSync(file, 'utf8')) as { children: Array<{ startTime?: string }> };
+      for (let i = 0; i < 40 && !read().children[0]?.startTime; i++) await new Promise((r) => setTimeout(r, 25));
+      expect(read().children[0]?.startTime).toMatch(/^[A-Z][a-z]{2} [A-Z][a-z]{2} +\d+ [\d:]+ \d{4}$/);
+      uninstallChildLedger();
+
+      const pid = sleeper();
+      const ledger = join(dir, `${DEAD_PID}.json`);
+      writeFileSync(ledger, JSON.stringify({ children: [{ pid, command: 'sleep', spawnedAt: 0, startTime: lstart(pid) }] }));
+      const reaped = await reapOrphanAgentChildren(dir, undefined, 200);
+      expect(reaped).toContainEqual({ ownerPid: DEAD_PID, pid, command: 'sleep', killed: true });
+      expect(await waitGone(pid)).toBe(true);
+    } finally {
+      if (saved === undefined) delete process.env.LC_ALL;
+      else process.env.LC_ALL = saved;
+    }
   });
 
   it('leaves the ledger of a bridge that is still running', async () => {

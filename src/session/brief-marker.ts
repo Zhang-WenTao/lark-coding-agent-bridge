@@ -5,10 +5,16 @@
  * on the bot layer.
  */
 
+/**
+ * One character of a brief: anything but a line break, and a `]` only when it
+ * does not start the closing `]]` — so `[ANTELOPE-1]` or a markdown link
+ * inside the brief does not cut it short (`…[A-1]]]` keeps its own `]`).
+ */
+const BRIEF_CHAR = String.raw`(?:[^\]\n]|\](?!\](?!\])))`;
 /** `[[BRIEF: 一句话简述]]` anywhere in the answer (normally its last lines). */
-const BRIEF_MARKER = /[ \t]*\[\[BRIEF[:：]\s*([^\]\n]*?)\s*\]\][ \t]*\n?/g;
+const BRIEF_MARKER = new RegExp(String.raw`[ \t]*\[\[BRIEF[:：]\s*(${BRIEF_CHAR}*?)\s*\]\](?!\])[ \t]*\n?`, 'g');
 /** A marker still arriving at the end of a stream: `[[`, `[[BRI`, `[[BRIEF: 已完`… */
-const BRIEF_PARTIAL = /\s*\[\[(?:B(?:R(?:I(?:E(?:F(?:[:：][^\]\n]*)?)?)?)?)?)?$/;
+const BRIEF_PARTIAL = new RegExp(String.raw`\s*\[\[(?:B(?:R(?:I(?:E(?:F(?:[:：]${BRIEF_CHAR}*\]?)?)?)?)?)?)?$`);
 
 const BRIEF_MAX = 120;
 

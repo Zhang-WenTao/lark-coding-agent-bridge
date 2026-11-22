@@ -37,6 +37,15 @@ interface Installed {
 
 let installed: Installed | undefined;
 
+/**
+ * Environment for `ps`: `lstart` follows the locale (`日 11月/22 23:00:19 2026`
+ * under zh_CN), and the reaper only reads the C-locale form. Recording and
+ * reading both use it, so a bridge started under another locale still reaps.
+ */
+export function psEnv(): NodeJS.ProcessEnv {
+  return { ...process.env, LC_ALL: 'C' };
+}
+
 /** Start recording this process's agent children under `dir`. */
 export function installChildLedger(dir: string, ownerPid: number = process.pid): void {
   mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -64,7 +73,7 @@ export function trackAgentChild(child: ChildProcess, command: string): void {
     if (ledger.children.delete(pid)) persist();
   });
   if (process.platform === 'win32') return;
-  execFile('ps', ['-o', 'lstart=', '-p', String(pid)], { timeout: 5000 }, (err, stdout) => {
+  execFile('ps', ['-o', 'lstart=', '-p', String(pid)], { timeout: 5000, env: psEnv() }, (err, stdout) => {
     const startTime = String(stdout ?? '').trim();
     if (err || !startTime || ledger.children.get(pid) !== rec) return;
     rec.startTime = startTime;

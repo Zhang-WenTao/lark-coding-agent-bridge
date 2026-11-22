@@ -23,6 +23,17 @@ describe('brief marker', () => {
     expect(newSessionRequest(stripBriefMarker(after))).toEqual({ summary: '做完了' });
   });
 
+  it('keeps square brackets inside the brief (ticket ids, markdown links)', () => {
+    const ticket = 'x\n[[BRIEF: 已建 [ANTELOPE-1] 单，待处理]]';
+    expect(briefOf(ticket)).toBe('已建 [ANTELOPE-1] 单，待处理');
+    expect(stripBriefMarker(ticket)).toBe('x');
+    expect(briefOf('x\n[[BRIEF: 见 [PR](https://x/1)]]')).toBe('见 [PR](https://x/1)');
+    expect(briefOf('x\n[[BRIEF: 已建 [A-1]]]')).toBe('已建 [A-1]');
+    expect(stripBriefMarker('x\n[[BRIEF: 已建 [A-1]]]')).toBe('x');
+    expect(stripBriefMarker('正文\n[[BRIEF: 已建 [A-1] 单', true)).toBe('正文');
+    expect(stripBriefMarker('正文\n[[BRIEF: 已建 [A-1]', true)).toBe('正文');
+  });
+
   it('hides a marker still streaming in', () => {
     expect(stripBriefMarker('正文\n[[BRIEF: 已', true)).toBe('正文');
     expect(stripBriefMarker('正文\n[[BR', true)).toBe('正文');

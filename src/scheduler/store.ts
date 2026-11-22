@@ -11,9 +11,11 @@ interface JobData {
 /**
  * Durable per-profile list of scheduled jobs.
  *
- * Same shape and durability contract as the session / workspace stores:
- * atomic 0600 writes, serialized persists, and a load that tolerates a
- * truncated or hand-edited file rather than refusing to start the bridge.
+ * Atomic 0600 writes and serialized persists, like the session / workspace
+ * stores. A truncated or hand-edited file is moved aside and the bridge starts
+ * with no jobs (a warn in the log, no DM). Unlike sessions / workspaces, which
+ * refuse to start when the corrupt file cannot be moved aside, this store then
+ * stays read-only for the run so the only copy is not saved over.
  */
 export class JobStore {
   private data: JobData = { jobs: {} };
