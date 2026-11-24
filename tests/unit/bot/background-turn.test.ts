@@ -61,6 +61,36 @@ describe('background turn replies', () => {
     ).toBeUndefined();
   });
 
+  it('keeps just the answer a turn ends on when the reply is final-answer-only', () => {
+    const events = [
+      { type: 'text', delta: '看一下构建结果。' },
+      { type: 'tool_use', id: 't', name: 'Bash', input: { command: 'tail build.log' } },
+      { type: 'tool_result', id: 't', output: 'ok', isError: false },
+      { type: 'text', delta: '构建通过了。' },
+      done,
+    ] as const;
+    const text = renderText(
+      backgroundTurnState({ kind: 'turn', events: [...events], background: 0 }, keepAll, { finalAnswerOnly: true })!,
+    );
+    expect(text).toContain('后台任务');
+    expect(text).toContain('构建通过了');
+    expect(text).not.toContain('看一下构建结果');
+    expect(text).not.toContain('tail build.log');
+
+    // The full record, as before, when the option is off.
+    const full = renderText(backgroundTurnState({ kind: 'turn', events: [...events], background: 0 }, keepAll)!);
+    expect(full).toContain('看一下构建结果');
+
+    // A [[NO_REPLY]] answer after tool calls still means no reply.
+    expect(
+      backgroundTurnState(
+        { kind: 'turn', events: [...events.slice(0, 3), { type: 'text', delta: '[[NO_REPLY]]' }, done], background: 0 },
+        keepAll,
+        { finalAnswerOnly: true },
+      ),
+    ).toBeUndefined();
+  });
+
   it('always reports background work that was stopped at the cap', () => {
     const state = backgroundTurnState({ kind: 'stopped', reason: 'max-linger', afterMs: 30 * 60_000 }, keepAll);
     expect(renderText(state!)).toContain('30 分钟');

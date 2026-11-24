@@ -342,6 +342,36 @@ export function stripControlMarkers(state: RunState): RunState {
   return stripNoReply(stripSessionMarker(state));
 }
 
+/**
+ * The run cut down to the answer it ends on, for a reply posted once at the
+ * end (text mode): the final text when the agent reported one (Codex), else
+ * the text after the last tool call — what the agent wrote once its work was
+ * done. Claude never reports a final text, so without this cut its notes
+ * between tool calls ("我先看一下…") end up in the reply.
+ *
+ * A run that never got past a tool call (stopped, failed or paused in the
+ * middle of its work) has no such text: it keeps everything it said, so the
+ * terminal notice is not all that is left.
+ *
+ * Pass the raw state, before `stripControlMarkers` and the `showToolCalls`
+ * filter: tool blocks mark where the answer starts, and a `[[NO_REPLY]]`
+ * answer has to still be the answer when markers are stripped afterwards —
+ * cutting after the strip would fall back to the notes before it.
+ */
+export function finalAnswerState(state: RunState): RunState {
+  const text = (blocks: readonly Block[]): Block[] => blocks.filter((b) => b.kind === 'text');
+  let blocks: Block[];
+  if (state.finalText) {
+    blocks = [{ kind: 'text', content: state.finalText, streaming: false }];
+  } else {
+    let start = state.blocks.length;
+    while (start > 0 && state.blocks[start - 1]?.kind !== 'tool') start--;
+    const answer = text(state.blocks.slice(start));
+    blocks = answer.length > 0 ? answer : text(state.blocks);
+  }
+  return { ...state, blocks, reasoning: { content: '', active: false }, footer: null };
+}
+
 /** The answer text of a run state: its final text, else its last text block. */
 export function answerTextOf(state: RunState | undefined): string | undefined {
   if (!state) return undefined;
