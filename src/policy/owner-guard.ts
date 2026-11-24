@@ -257,7 +257,10 @@ export function restrictedChatGuard(
     ],
     allowedRoots: [...base.allowedRoots, ...readOnly],
     readDeny: [...base.readDeny, ...paths.filter((p) => !holdsReadOnly(p)).flatMap((p) => [p, join(p, '**')])],
-    deniedTools: [...base.deniedTools, ...(chat.deniedTools ?? [])],
+    deniedTools: [
+      ...base.deniedTools.filter((t) => !(chat.grantedTools ?? []).includes(t)),
+      ...(chat.deniedTools ?? []),
+    ],
     deniedCommands: [
       ...base.deniedCommands.filter((re) => !(chat.grantedCommands ?? []).includes(re)),
       ...chat.deniedCommands,

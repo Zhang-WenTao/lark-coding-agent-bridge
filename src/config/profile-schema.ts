@@ -116,6 +116,11 @@ export interface RestrictedChat {
    * here is not held to them (the chat's own `deniedCommands` still apply).
    */
   grantedCommands?: string[];
+  /**
+   * Entries of `access.guestDeniedTools` lifted in this chat for guest runs
+   * (the chat's own `deniedTools` still apply).
+   */
+  grantedTools?: string[];
   /** Paths (`~` allowed) the run may neither read nor change. */
   deniedPaths?: string[];
   /**
@@ -600,6 +605,7 @@ function normalizeRestrictedChat(value: unknown): RestrictedChat | undefined {
   const readOnlyPaths = stringArray(raw.readOnlyPaths);
   const deniedTools = stringArray(raw.deniedTools);
   const grantedCommands = stringArray(raw.grantedCommands);
+  const grantedTools = stringArray(raw.grantedTools);
   const text = (v: unknown): string | undefined => (typeof v === 'string' && v.trim() ? v.trim() : undefined);
   const workspace = text(raw.workspace);
   const refusal = text(raw.refusal);
@@ -607,6 +613,7 @@ function normalizeRestrictedChat(value: unknown): RestrictedChat | undefined {
   return {
     deniedCommands: stringArray(raw.deniedCommands),
     ...(grantedCommands.length > 0 ? { grantedCommands } : {}),
+    ...(grantedTools.length > 0 ? { grantedTools } : {}),
     ...(deniedPaths.length > 0 ? { deniedPaths } : {}),
     ...(readOnlyPaths.length > 0 ? { readOnlyPaths } : {}),
     ...(deniedTools.length > 0 ? { deniedTools } : {}),

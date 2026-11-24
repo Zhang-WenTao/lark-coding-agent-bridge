@@ -67,4 +67,23 @@ describe('access.publicDm', () => {
     expect(fenced.rules).toContainEqual({ path: `${HOME}/Desktop/coding/lark/alphaess`, bash: 'write' });
     expect(fenced.openDirs).toContainEqual({ path: `${HOME}/Desktop/coding/lark/alphaess`, readOnly: true });
   });
+
+  it('lifts granted guest tools but keeps the chat own denials', () => {
+    const HOME = '/Users/someone';
+    const guest = ownerOnlyGuard({
+      larkChannelHome: `${HOME}/.lark-channel`,
+      deniedTools: ['mcp__jira__jira_add_comment', 'mcp__jira__jira_delete_issue', 'mcp__github__create_pull_request'],
+      home: HOME,
+      root: bridgeRoot(),
+    });
+    const fenced = restrictedChatGuard(guest, {
+      deniedCommands: [],
+      grantedTools: ['mcp__jira__jira_add_comment', 'mcp__jira__jira_delete_issue'],
+      deniedTools: ['mcp__jira__jira_delete_issue'],
+    });
+    expect(fenced.deniedTools).not.toContain('mcp__jira__jira_add_comment');
+    expect(fenced.deniedTools).toContain('mcp__jira__jira_delete_issue');
+    expect(fenced.deniedTools).toContain('mcp__github__create_pull_request');
+    expect(profile({ enabled: true, deniedCommands: [], grantedTools: ['x'] }).access.publicDm?.grantedTools).toEqual(['x']);
+  });
 });
