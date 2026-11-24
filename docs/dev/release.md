@@ -22,8 +22,8 @@ semver，fork 从 `v0.8.0` 起独立编号：有新功能升 minor，只有修�
 3. 在主 checkout 的 main 上打注解 tag 并推送（`M=~/workspace/lark-coding-agent-bridge`）：
    - `git -C $M fetch -q origin`，确认 `git -C $M rev-parse main` 等于 `origin/main`，且 `HEAD` 就是发版提交；
    - `git -C $M tag -a vX.Y.Z -m vX.Y.Z && git -C $M push origin vX.Y.Z`。
-4. 盯流水线：`gh run list -R mirsery/lark-coding-agent-bridge --workflow release.yml -L 1` 取 run id，`gh run watch <id> -R mirsery/lark-coding-agent-bridge --exit-status`。
-5. 核对 Release：`gh release view vX.Y.Z -R mirsery/lark-coding-agent-bridge`，正文和附件都在。
+4. 盯流水线：`gh run list -R Zhang-WenTao/lark-coding-agent-bridge --workflow release.yml -L 1` 取 run id，`gh run watch <id> -R Zhang-WenTao/lark-coding-agent-bridge --exit-status`。
+5. 核对 Release：`gh release view vX.Y.Z -R Zhang-WenTao/lark-coding-agent-bridge`，正文和附件都在。
 6. 汇报：版本号、Release 链接、流水线结果（失败就贴失败的 job 和报错）。
 
 ## 失败了怎么办

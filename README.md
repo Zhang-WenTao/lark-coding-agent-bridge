@@ -27,10 +27,10 @@ For a product walkthrough, see the [Feishu document](https://larkcommunity.feish
 
 ## Install (this fork: build from source + npm link)
 
-This repo is a customized fork, [`mirsery/lark-coding-agent-bridge`](https://github.com/mirsery/lark-coding-agent-bridge), with changes that are not in the npm package: a Sponsor line on reply cards, a task panel, a joint-debug help group, and more. **Do not install with `npm i -g lark-channel-bridge`**: that runs the upstream release and none of this fork's changes take effect.
+This repo, [`Zhang-WenTao/lark-coding-agent-bridge`](https://github.com/Zhang-WenTao/lark-coding-agent-bridge), is a customized fork we maintain ourselves (forked from the shared [`scwsl/lark-coding-agent-bridge`](https://github.com/scwsl/lark-coding-agent-bridge)), with changes that are not in the npm package: a Sponsor line on reply cards, a task panel, a joint-debug help group, and more. **Do not install with `npm i -g lark-channel-bridge`**: that runs the upstream release and none of this fork's changes take effect.
 
 ```bash
-git clone git@github.com:mirsery/lark-coding-agent-bridge.git ~/workspace/lark-coding-agent-bridge
+git clone git@github.com:Zhang-WenTao/lark-coding-agent-bridge.git ~/workspace/lark-coding-agent-bridge
 cd ~/workspace/lark-coding-agent-bridge
 pnpm install        # the prepare script also runs a build
 pnpm build          # builds the web console and dist/
