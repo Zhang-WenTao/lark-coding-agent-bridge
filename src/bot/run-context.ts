@@ -24,16 +24,21 @@ export interface RunContext {
   updatedAt: string;
 }
 
+/** Tests point this elsewhere (tests/setup) so a suite run never writes the live profile's files. */
+function runContextDir(appDir: string): string {
+  return process.env.LARK_CHANNEL_RUN_CONTEXT_DIR || join(appDir, 'run-context');
+}
+
 export function runContextPath(appDir: string, scope: string): string {
   const name = createHash('sha1').update(scope).digest('hex').slice(0, 16);
-  return join(appDir, 'run-context', `${name}.json`);
+  return join(runContextDir(appDir), `${name}.json`);
 }
 
 /** Write atomically; returns the path, or undefined when the write failed. */
 export function writeRunContext(appDir: string, ctx: RunContext): string | undefined {
   const path = runContextPath(appDir, ctx.scope);
   try {
-    mkdirSync(join(appDir, 'run-context'), { recursive: true });
+    mkdirSync(runContextDir(appDir), { recursive: true });
     const tmp = `${path}.${process.pid}.tmp`;
     writeFileSync(tmp, JSON.stringify(ctx, null, 2), 'utf8');
     renameSync(tmp, path);

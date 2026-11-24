@@ -1,10 +1,13 @@
 import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { runContextPath, writeRunContext } from '../../../src/bot/run-context';
 
 describe('run context file', () => {
+  let saved: string | undefined;
+  beforeEach(() => { saved = process.env.LARK_CHANNEL_RUN_CONTEXT_DIR; delete process.env.LARK_CHANNEL_RUN_CONTEXT_DIR; });
+  afterEach(() => { if (saved) process.env.LARK_CHANNEL_RUN_CONTEXT_DIR = saved; });
   it('is stable per scope and rewritten with the latest sender', () => {
     const dir = mkdtempSync(join(tmpdir(), 'runctx-'));
     const base = {

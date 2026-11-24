@@ -11,3 +11,10 @@ for (const key of [
 ]) {
   delete process.env[key];
 }
+
+// Every batch writes a run-context file (src/bot/run-context.ts); keep the
+// suite's out of the live ~/.lark-channel/run-context.
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+process.env.LARK_CHANNEL_RUN_CONTEXT_DIR = mkdtempSync(join(tmpdir(), 'run-context-'));
