@@ -71,11 +71,32 @@ export interface SecretsConfig {
  *   - `card`: full interactive card (tool panels, ⏹ button, footer status)
  *   - `markdown`: lightweight streaming markdown card (typewriter, no buttons)
  *   - `text`: plain markdown post sent once at run completion (no streaming)
+ *   - `final-card`: like `text`, but the answer goes out as one clean card —
+ *     no progress, buttons, tool blocks or byline (see `finalCard`)
  *
  * Pre-0.1.27 only had `card` and `text`, where `text` meant what's now called
  * `markdown`. See `messageReplyMigrated` for the auto-coercion logic.
  */
-export type MessageReplyMode = 'card' | 'markdown' | 'text';
+export type MessageReplyMode = 'card' | 'markdown' | 'text' | 'final-card';
+export const MESSAGE_REPLY_MODES: readonly MessageReplyMode[] = ['card', 'markdown', 'text', 'final-card'];
+export function isMessageReplyMode(value: unknown): value is MessageReplyMode {
+  return MESSAGE_REPLY_MODES.includes(value as MessageReplyMode);
+}
+
+/** Feishu card header colours (`header.template`). */
+export const CARD_HEADER_TEMPLATES = [
+  'blue', 'wathet', 'turquoise', 'green', 'yellow', 'orange', 'red',
+  'carmine', 'violet', 'purple', 'indigo', 'grey', 'default',
+] as const;
+export type CardHeaderTemplate = (typeof CARD_HEADER_TEMPLATES)[number];
+
+/** `messageReply: 'final-card'` appearance. Config-file only. */
+export interface FinalCardPreference {
+  /** Header bar colour, used only when the answer gets a header. Default `violet`. */
+  headerTemplate?: CardHeaderTemplate;
+  /** A grey line under the answer naming the model. Default off. */
+  footer?: boolean;
+}
 export type CotMessagesMode = 'off' | 'brief' | 'detailed';
 /**
  * Reasoning effort levels across agents. Claude Code's `--effort` accepts
@@ -147,6 +168,8 @@ export interface AppPreferences {
    * answer in text mode. Config-file only. Default on.
    */
   textReplyFinalOnly?: boolean;
+  /** How `messageReply: 'final-card'` looks. Config-file only. */
+  finalCard?: FinalCardPreference;
   /**
    * Model the underlying agent runs with, forwarded as `--model`. The catalog
    * of valid values is agent-kind specific — see `agent/models.ts`. `undefined`
@@ -728,8 +751,18 @@ export function getMessageReplyMode(cfg: AppConfig): MessageReplyMode {
   if (raw === 'text' && cfg.preferences?.messageReplyMigrated !== true) {
     return 'markdown';
   }
-  if (raw === 'card' || raw === 'markdown' || raw === 'text') return raw;
+  if (isMessageReplyMode(raw)) return raw;
   return 'markdown';
+}
+
+/** `finalCard` with defaults applied; an unknown header colour falls back to violet. */
+export function getFinalCardPreference(cfg: AppConfig): Required<FinalCardPreference> {
+  const raw = cfg.preferences?.finalCard;
+  const template = raw?.headerTemplate;
+  return {
+    headerTemplate: template && CARD_HEADER_TEMPLATES.includes(template) ? template : 'violet',
+    footer: raw?.footer === true,
+  };
 }
 
 /** Resolve the show-tool-calls preference with default fallback. */

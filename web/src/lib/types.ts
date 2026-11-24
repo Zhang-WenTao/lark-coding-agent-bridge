@@ -2,7 +2,7 @@
 export type AgentKind = string;
 export type ProfileMode = "personal" | "team";
 export type LarkCliIdentity = "bot-only" | "user-default";
-export type MessageReply = "card" | "markdown" | "text";
+export type MessageReply = "card" | "markdown" | "text" | "final-card";
 export type CotMessages = "off" | "brief" | "detailed";
 
 export interface Status {
