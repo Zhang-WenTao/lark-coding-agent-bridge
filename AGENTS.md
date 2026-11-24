@@ -6,7 +6,8 @@
 
 ## 仓库边界
 
-- 这是 boss 自己的 fork，只有一个 remote：`origin` = `git@github.com:mirsery/lark-coding-agent-bridge.git`。上游已移除：不加回 upstream、不往上游推分支 / 开 PR / 提 issue。需求记录开在 `mirsery/lark-coding-agent-bridge`。
+- 这是我们自己维护的 fork，只有一个 remote：`origin` = `git@github.com:Zhang-WenTao/lark-coding-agent-bridge.git`。分支、PR、需求记录都在这个仓库。文中的 boss 指本仓库的维护者。
+- 上游链：`scwsl/lark-coding-agent-bridge`（部门共用的桥接，本仓库从它 fork）← `mirsery/…` ← `zarazhangrui/…`。不加上游 remote，也不往上游推分支、开 PR、提 issue。要同步上游改动时，用一次性 fetch，不留 remote：`git fetch git@github.com:scwsl/lark-coding-agent-bridge.git main`，再把 `FETCH_HEAD` 合进一个分支，按下面的迭代流程过门禁后进 main。
 - 默认分支 `main`。提交信息、代码注释、PR 描述里不出现任何 AI 工具署名（`Co-Authored-By: Claude …`、`Co-Authored-By: Codex …`、`Generated with …` 之类一律不加）。
 
 ## 本机运行形态（改动怎么生效）

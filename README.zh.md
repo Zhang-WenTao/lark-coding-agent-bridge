@@ -27,10 +27,10 @@
 
 ## 安装（本 fork：源码构建 + npm link）
 
-本仓库是 [`mirsery/lark-coding-agent-bridge`](https://github.com/mirsery/lark-coding-agent-bridge) 的定制 fork，包含卡片 Sponsor 署名、任务面板、联调帮助分组等 npm 包里没有的改动。**不要用 `npm i -g lark-channel-bridge` 安装**，否则跑的是上游发布版，本 fork 的改动全部不生效。
+本仓库 [`Zhang-WenTao/lark-coding-agent-bridge`](https://github.com/Zhang-WenTao/lark-coding-agent-bridge) 是我们自己维护的定制 fork（fork 自部门共用的 [`scwsl/lark-coding-agent-bridge`](https://github.com/scwsl/lark-coding-agent-bridge)），包含卡片 Sponsor 署名、任务面板、联调帮助分组等 npm 包里没有的改动。**不要用 `npm i -g lark-channel-bridge` 安装**，否则跑的是上游发布版，本 fork 的改动全部不生效。
 
 ```bash
-git clone git@github.com:mirsery/lark-coding-agent-bridge.git ~/workspace/lark-coding-agent-bridge
+git clone git@github.com:Zhang-WenTao/lark-coding-agent-bridge.git ~/workspace/lark-coding-agent-bridge
 cd ~/workspace/lark-coding-agent-bridge
 pnpm install        # prepare 脚本会顺带执行一次 build
 pnpm build          # 构建 web 控制台 + dist/
