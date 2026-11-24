@@ -13,7 +13,13 @@ export interface ToolEntry {
 }
 
 export type Block =
-  | { kind: 'text'; content: string; streaming: boolean }
+  | {
+      kind: 'text';
+      content: string;
+      streaming: boolean;
+      /** Set on lines the bridge adds itself (account switch, mid-run supplement), not the agent. */
+      note?: 'account' | 'supplement';
+    }
   | { kind: 'tool'; tool: ToolEntry };
 
 export type FooterStatus = 'thinking' | 'tool_running' | 'streaming' | null;
@@ -163,6 +169,7 @@ export function reduce(state: RunState, evt: AgentEvent): RunState {
         kind: 'text',
         content: `🔄 **账户 ${evt.switchedFrom} ${evt.reason ?? '额度用尽'}，已切换到 ${evt.label} 继续**\n\n`,
         streaming: false,
+        note: 'account',
       };
       const { limit: _limit, ...rest } = state;
       return {
@@ -191,6 +198,7 @@ export function reduce(state: RunState, evt: AgentEvent): RunState {
         kind: 'text',
         content: `➕ **收到补充**：${evt.preview}`,
         streaming: false,
+        note: 'supplement',
       };
       return {
         ...state,

@@ -5,6 +5,7 @@ import type {
   MessageReplyMode,
   SecretsConfig,
 } from './schema';
+import { isMessageReplyMode } from './schema';
 import {
   normalizePermissions,
   permissionsToLegacySandbox,
@@ -559,7 +560,7 @@ function normalizePreferences(
 }
 
 function isMessageReply(value: unknown): value is MessageReplyMode {
-  return value === 'card' || value === 'markdown' || value === 'text';
+  return isMessageReplyMode(value);
 }
 
 function normalizeAccess(

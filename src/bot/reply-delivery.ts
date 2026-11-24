@@ -1,14 +1,15 @@
 import type { LarkChannel } from '@larksuite/channel';
 import { LarkChannelError } from '@larksuite/channel';
 import { answerPosts, codeOnlyPosts, hasCodeBlock, hasMarkdownTable } from '../card/answer-post';
-import { fullText } from '../card/card-budget';
+import { CARD_BYTE_BUDGET, cardBytes, fullText } from '../card/card-budget';
+import { finalCardText, renderFinalCard } from '../card/final-card';
 import { runStrings, type Locale } from '../card/i18n';
 import { runningToolLabel } from '../card/run-activity';
 import { renderCard } from '../card/run-renderer';
 import type { RunActivity, RunCardRenderOptions } from '../card/run-renderer';
 import { backgroundLeft, type Block, type RunState } from '../card/run-state';
 import { renderText } from '../card/text-renderer';
-import type { getMessageReplyMode } from '../config/schema';
+import type { FinalCardPreference, getMessageReplyMode } from '../config/schema';
 import { log } from '../core/logger';
 import type { RunHandle } from '../runtime/active-runs';
 import { larkErrorCode } from './card-patch-health';
@@ -362,6 +363,8 @@ export async function sendFinalReply(input: {
   replyMode: ReturnType<typeof getMessageReplyMode>;
   sendOpts: { replyTo: string; replyInThread?: boolean };
   cardRenderOptions: RunCardRenderOptions;
+  /** `final-card` appearance (`preferences.finalCard`); defaults when absent. */
+  finalCard?: Required<FinalCardPreference>;
 }): Promise<void> {
   const body = renderText(input.state, input.cardRenderOptions.locale);
 
@@ -373,7 +376,9 @@ export async function sendFinalReply(input: {
     return;
   }
 
-  if (input.replyMode === 'card') {
+  if (input.replyMode === 'final-card') {
+    await sendFinalCard(input, body);
+  } else if (input.replyMode === 'card') {
     // An answer with code goes out as posts instead, so its code blocks copy
     // whole (see deliverCodeNatively) — unless the card has more to say than
     // the answer, or the answer holds a table a post can't draw.
@@ -424,6 +429,54 @@ export async function sendFinalReply(input: {
     requireMessageReceipt(result, 'text');
     log.info('outbound', 'sent', outboundLogFields(input, 'text', body, result));
   }
+}
+
+/**
+ * `final-card`: one non-streaming card holding the answer. A card Feishu would
+ * refuse (past the size budget) or did refuse (e.g. 230099, too many tables)
+ * goes out as a plain markdown post instead, so the answer always lands. A
+ * send that returned without a receipt is not retried — the card may be out.
+ */
+async function sendFinalCard(
+  input: Parameters<typeof sendFinalReply>[0],
+  body: string,
+): Promise<void> {
+  const pref = input.finalCard ?? { headerTemplate: 'violet' as const, footer: false };
+  const meta = input.cardRenderOptions.meta;
+  const locale = input.cardRenderOptions.locale;
+  const card = renderFinalCard(input.state, {
+    botName: meta?.title ?? '',
+    headerTemplate: pref.headerTemplate,
+    ...(pref.footer && meta?.model ? { footerModel: meta.model } : {}),
+    ...(locale ? { locale } : {}),
+  });
+  if (!card) {
+    log.info('outbound', 'skip-empty', { scope: input.scope, mode: input.replyMode });
+    return;
+  }
+  if (cardBytes(card) <= CARD_BYTE_BUDGET) {
+    let result: { messageId?: string } | undefined;
+    try {
+      result = await input.channel.send(input.chatId, { card }, input.sendOpts);
+    } catch (err) {
+      log.warn('outbound', 'final-card-failed', {
+        scope: input.scope,
+        code: larkErrorCode(err),
+        err: err instanceof Error ? err.message : String(err),
+      });
+    }
+    if (result) {
+      requireMessageReceipt(result, 'final-card');
+      log.info('outbound', 'sent', outboundLogFields(input, 'final-card', body, result));
+      return;
+    }
+  } else {
+    log.info('outbound', 'final-card-too-large', { scope: input.scope, bytes: cardBytes(card) });
+  }
+  const markdown = finalCardText(input.state, locale);
+  const result = await input.channel.send(input.chatId, { markdown }, input.sendOpts);
+  requireMessageReceipt(result, 'final-card-fallback');
+  log.info('outbound', 'sent', outboundLogFields(input, 'final-card-fallback', markdown, result));
 }
 
 export function requireMessageReceipt(result: { messageId?: string }, type: string): void {

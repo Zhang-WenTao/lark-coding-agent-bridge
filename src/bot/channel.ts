@@ -52,7 +52,7 @@ import {
 } from '../card/run-state';
 import { renderText } from '../card/text-renderer';
 import { tryHandleCommand, type Controls } from '../commands';
-import { parseNotifyTarget, type AppConfig } from '../config/schema';
+import { parseNotifyTarget, type AppConfig, type MessageReplyMode } from '../config/schema';
 import {
   effortPrefForChat,
   getAgentStopGraceMs,
@@ -65,6 +65,7 @@ import {
   getRunIdleTimeoutMs,
   getShowToolCalls,
   getSmartSession,
+  getFinalCardPreference,
   getTextReplyFinalOnly,
   getWorktreeCleanupIdleDays,
   resolveBotOverload,
@@ -2654,7 +2655,7 @@ async function submitBatchRun(
   // started reported back) go out as a follow-up reply to the same message.
   run.deliverBackgroundTurn = async (turn) => {
     const state = backgroundTurnState(turn, filterForPrefs, {
-      finalAnswerOnly: replyMode === 'text' && !separateFinalReply && getTextReplyFinalOnly(controls.cfg),
+      finalAnswerOnly: !separateFinalReply && answerOnlyReply(replyMode, controls.cfg),
     });
     if (state) {
       // The follow-up's byline reports the background turn's own consumption.
@@ -2671,6 +2672,7 @@ async function submitBatchRun(
         cardRenderOptions: cardRenderOptions.meta
           ? { ...cardRenderOptions, meta: { ...meta, usage } }
           : cardRenderOptions,
+        finalCard: getFinalCardPreference(controls.cfg),
       });
     }
     // 会话智能压缩: the turn that ends the background work may close the
@@ -2820,6 +2822,7 @@ async function deliverRunReply(
         replyMode,
         sendOpts,
         cardRenderOptions,
+        finalCard: getFinalCardPreference(deps.controls.cfg),
       });
       return;
     }
@@ -3114,9 +3117,9 @@ async function deliverRunReply(
     run.runLimit = latestState.limit;
     run.runError = latestState.errorMsg;
   } else {
-    // text mode: drain the agent stream without sending anything during
-    // the run, then post the final rendered text once as a plain markdown
-    // (msg_type=post) message — no card, no streaming, no typewriter.
+    // text / final-card mode: drain the agent stream without sending anything
+    // during the run, then post the answer once — as a plain markdown
+    // (msg_type=post) message, or as one clean card. No streaming either way.
     const finalState = await processAgentStream(
       handle,
       eventStream,
@@ -3126,12 +3129,12 @@ async function deliverRunReply(
       async () => {},
     );
     run.answerIsNewMessage = true;
-    // `textReplyFinalOnly`: only the answer the run ends on goes out. The cut
-    // comes before filterForPrefs, which drops the tool blocks it is made at
-    // and a [[NO_REPLY]] answer (see finalAnswerState).
+    // Only the answer the run ends on goes out (`final-card`, or text with
+    // `textReplyFinalOnly`). The cut comes before filterForPrefs, which drops
+    // the tool blocks it is made at and a [[NO_REPLY]] answer (see finalAnswerState).
     const state = separateFinalReply
       ? finalAnswerOnlyState(filterForPrefs(finalState))
-      : getTextReplyFinalOnly(deps.controls.cfg)
+      : answerOnlyReply(replyMode, deps.controls.cfg)
         ? filterForPrefs(finalAnswerState(finalState))
         : filterForPrefs(finalState);
     // filterForPrefs records what it was given; the raw state is the whole run.
@@ -3144,6 +3147,7 @@ async function deliverRunReply(
       replyMode,
       sendOpts,
       cardRenderOptions,
+      finalCard: getFinalCardPreference(deps.controls.cfg),
     });
     run.runTerminal = finalState.terminal;
     run.runLimit = finalState.limit;
@@ -3521,6 +3525,14 @@ function withResumedNote(card: object, at: number, locale: Locale | undefined): 
 }
 
 const BACKGROUND_TURN_PREFIX = '（后台任务有了新进展）\n\n';
+
+/**
+ * Replies posted once at the end that carry only the answer the run ends on:
+ * `final-card` always, `text` unless `textReplyFinalOnly` is off.
+ */
+function answerOnlyReply(replyMode: MessageReplyMode, cfg: AppConfig): boolean {
+  return replyMode === 'final-card' || (replyMode === 'text' && getTextReplyFinalOnly(cfg));
+}
 
 /**
  * The reply state for a background turn, or undefined when it has nothing to

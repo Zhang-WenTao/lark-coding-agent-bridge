@@ -133,6 +133,16 @@ describe('profile-aware account and config commands', () => {
     expect(root.profiles.claude?.approvals?.enabled).toBe(true);
   });
 
+  it('saves the final-card reply mode and keeps the hand-written finalCard look', async () => {
+    vi.useFakeTimers();
+    const h = await createHarness();
+    h.controls.profileConfig.preferences.finalCard = { headerTemplate: 'purple', footer: true };
+
+    await h.command('/config submit', { message_reply: 'final-card' });
+    const root = await waitForRoot(h.rootDir, (candidate) => candidate.profiles.claude?.preferences.messageReply === 'final-card');
+    expect(root.profiles.claude?.preferences.finalCard).toEqual({ headerTemplate: 'purple', footer: true });
+  });
+
   it('persists the picked model and clears it when "default" is chosen', async () => {
     vi.useFakeTimers();
     const h = await createHarness();

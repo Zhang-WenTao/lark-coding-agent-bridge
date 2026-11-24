@@ -314,7 +314,7 @@ export function configFormCard(opts: ConfigFormOpts): object {
                 tag: 'markdown',
                 content:
                   '**消息回复方式**\n' +
-                  '<font color="grey">纯文本=跑完一次性发 / 消息卡片=流式 markdown / 交互卡片=带工具面板与 ⏹ 停止按钮</font>',
+                  '<font color="grey">纯文本=跑完一次性发 / 结果卡片=跑完发一张只有答案的卡片 / 消息卡片=流式 markdown / 交互卡片=带工具面板与 ⏹ 停止按钮</font>',
               },
               {
                 tag: 'select_static',
@@ -322,6 +322,7 @@ export function configFormCard(opts: ConfigFormOpts): object {
                 initial_option: opts.messageReply,
                 options: [
                   { text: { tag: 'plain_text', content: '纯文本' }, value: 'text' },
+                  { text: { tag: 'plain_text', content: '结果卡片' }, value: 'final-card' },
                   { text: { tag: 'plain_text', content: '消息卡片(默认)' }, value: 'markdown' },
                   { text: { tag: 'plain_text', content: '交互卡片' }, value: 'card' },
                 ],
@@ -529,7 +530,9 @@ export function configSavedCard(opts: ConfigFormOpts): object {
       ? '交互卡片'
       : opts.messageReply === 'markdown'
         ? '消息卡片'
-        : '纯文本';
+        : opts.messageReply === 'final-card'
+          ? '结果卡片'
+          : '纯文本';
   const summarize = (list: string[]): string =>
     list.length === 0 ? '无' : `${list.length} 项`;
   const cotLabel = cotMessagesLabel(opts.cotMessages);
