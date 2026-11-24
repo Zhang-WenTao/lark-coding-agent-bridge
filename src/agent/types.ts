@@ -148,6 +148,12 @@ export interface AgentRunOptions {
    */
   compactWindowTokens?: number;
   /**
+   * File describing who started the current turn and from which chat
+   * (bot/run-context.ts), exported to the agent as `LARK_CHANNEL_RUN_CONTEXT`.
+   * Stable per scope; the bridge rewrites its content every batch.
+   */
+  runContextFile?: string;
+  /**
    * Default model of the run's subagents (Claude Code's
    * `CLAUDE_CODE_SUBAGENT_MODEL`); one a subagent definition or call names
    * still wins. Adapters without subagents ignore it.

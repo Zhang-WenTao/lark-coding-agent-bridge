@@ -169,6 +169,7 @@ export class ClaudeAdapter implements AgentAdapter {
       env: mergeProcessEnv(process.env, {
         ...buildLarkChannelEnv(this.larkChannel),
         ...(guard?.env ?? {}),
+        ...(opts.runContextFile ? { LARK_CHANNEL_RUN_CONTEXT: opts.runContextFile } : {}),
         // 会话智能压缩: Claude Code auto-compacts against this window instead
         // of the model's full (up to 1M-token) one.
         ...(opts.compactWindowTokens ? { CLAUDE_CODE_AUTO_COMPACT_WINDOW: String(opts.compactWindowTokens) } : {}),

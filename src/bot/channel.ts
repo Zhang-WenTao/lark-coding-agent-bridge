@@ -12,6 +12,7 @@ import type {
 } from '@larksuite/channel';
 import { createLarkChannel, normalize } from '@larksuite/channel';
 import { mkdirSync } from 'node:fs';
+import { writeRunContext } from './run-context';
 import { dirname, join } from 'node:path';
 import { agentAccountName, startAgentWindowStagger } from '../agent/account';
 import { agentCapability } from '../agent/capability';
@@ -2347,6 +2348,27 @@ async function submitBatchRun(
   const rotationBlocked = executor.hasLiveProcess(scope) || quotes.length > 0;
   // 长任务完成提醒 measures from here: queueing behind the concurrency cap is
   // waiting the requester does too.
+  // Who started this turn and from where, for scripts the agent runs (the
+  // device-command ledger): rewritten every batch, so a reused process reads
+  // the current sender, not the one it was spawned for.
+  const runContextFile = writeRunContext(paths.appDir, {
+    scope,
+    chatId,
+    mode: mode === 'p2p' ? 'p2p' : mode === 'topic' ? 'topic' : 'group',
+    ...(threadId ? { threadId } : {}),
+    ...(mode !== 'p2p' && controls.knownChats?.find((c) => c.id === chatId)?.name
+      ? { chatName: controls.knownChats.find((c) => c.id === chatId)!.name }
+      : {}),
+    senders: [...new Map(batch.map((m) => [m.senderId, m])).values()].map((m) => ({
+      openId: m.senderId,
+      ...(m.senderName ? { name: m.senderName } : {}),
+      ...(senderTypeOf(m) ? { type: senderTypeOf(m) } : {}),
+    })),
+    ownerRun,
+    publicDm: mode === 'p2p' && !ownerRun && Boolean(controls.profileConfig.access.publicDm?.enabled),
+    messageIds: batch.map((m) => m.messageId),
+    updatedAt: new Date().toISOString(),
+  });
   const runSubmittedAt = Date.now();
   const flow = await startRunFlow({
     scopeId: scope,
@@ -2364,6 +2386,7 @@ async function submitBatchRun(
     stopGraceMs: getAgentStopGraceMs(controls.cfg),
     ...(runGuard ? { guard: runGuard } : {}),
     ...(restrictedCwd ? { cwd: restrictedCwd } : {}),
+    ...(runContextFile ? { runContextFile } : {}),
     ...(smartSession
       ? {
           compactWindowTokens: smartSession.compactWindowTokens,

@@ -138,8 +138,12 @@ export class CodexAdapter implements AgentAdapter {
     return 'app-server';
   }
 
-  private childEnv(): NodeJS.ProcessEnv {
-    const envOverrides: NodeJS.ProcessEnv = { ...this.extraEnv, ...buildLarkChannelEnv(this.larkChannel) };
+  private childEnv(runContextFile?: string): NodeJS.ProcessEnv {
+    const envOverrides: NodeJS.ProcessEnv = {
+      ...this.extraEnv,
+      ...buildLarkChannelEnv(this.larkChannel),
+      ...(runContextFile ? { LARK_CHANNEL_RUN_CONTEXT: runContextFile } : {}),
+    };
     if (this.codexHome) {
       envOverrides.CODEX_HOME = this.codexHome;
     } else if (!this.inheritCodexHome) {
@@ -174,7 +178,7 @@ export class CodexAdapter implements AgentAdapter {
         runId: opts.runId,
         binary: this.binary,
         cwd: opts.cwd,
-        env: this.childEnv(),
+        env: this.childEnv(opts.runContextFile),
         config: [
           '-c', 'approval_policy="never"',
           '-c', 'shell_environment_policy.inherit="all"',
@@ -213,7 +217,7 @@ export class CodexAdapter implements AgentAdapter {
     });
     const child = spawnProcess(this.binary, args, {
       cwd: opts.cwd,
-      env: this.childEnv(),
+      env: this.childEnv(opts.runContextFile),
       stdio: ['pipe', 'pipe', 'pipe'],
     }) as CodexChild;
     trackAgentChild(child, this.binary);

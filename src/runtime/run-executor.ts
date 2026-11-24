@@ -68,6 +68,8 @@ export interface SubmitRunInput {
   guard?: RunGuard;
   /** See AgentRunOptions.compactWindowTokens. */
   compactWindowTokens?: number;
+  /** See AgentRunOptions.runContextFile. */
+  runContextFile?: string;
   /** See AgentRunOptions.subagentModel. */
   subagentModel?: string;
   /** See AgentRunOptions.accountLineCap. */
@@ -204,6 +206,7 @@ export class RunExecutor {
       stopGraceMs: input.stopGraceMs,
       ...(input.guard ? { guard: input.guard } : {}),
       ...(input.compactWindowTokens ? { compactWindowTokens: input.compactWindowTokens } : {}),
+      ...(input.runContextFile ? { runContextFile: input.runContextFile } : {}),
       ...(input.subagentModel ? { subagentModel: input.subagentModel } : {}),
       ...(input.accountLineCap ? { accountLineCap: input.accountLineCap } : {}),
     };

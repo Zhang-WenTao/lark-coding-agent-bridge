@@ -58,6 +58,8 @@ export interface StartRunFlowInput {
   cwd?: string;
   /** 会话智能压缩: see AgentRunOptions.compactWindowTokens. */
   compactWindowTokens?: number;
+  /** See AgentRunOptions.runContextFile. */
+  runContextFile?: string;
   /**
    * The prompt's `<bridge_knowledge>` section (`full`, exactly as in the
    * prompt) and the stub that replaces it when the conversation the run
@@ -245,6 +247,7 @@ export async function startRunFlow(input: StartRunFlowInput): Promise<StartRunFl
       stopGraceMs: input.stopGraceMs,
       ...(input.guard ? { guard: input.guard } : {}),
       ...(input.compactWindowTokens ? { compactWindowTokens: input.compactWindowTokens } : {}),
+      ...(input.runContextFile ? { runContextFile: input.runContextFile } : {}),
       // Adapters without subagents (Codex) ignore it.
       ...(input.profileConfig.preferences.subagentModel ? { subagentModel: input.profileConfig.preferences.subagentModel } : {}),
       actor: { id: input.scope.actorId, ...(input.actorName ? { name: input.actorName } : {}) },
