@@ -94,6 +94,22 @@ export interface ProfileAccess {
    * these limits, the same way a restricted chat is. Omitted when unset.
    */
   publicDm?: PublicDm;
+  /** Recognise private chats opened through an outside entry page (Alice). */
+  entryTracking?: EntryTracking;
+}
+
+/**
+ * `access.entryTracking`: the entry link opens a Miaoda app that logs each
+ * visitor (open_id under this bot) before jumping to the bot chat; private
+ * turns whose sender visited within the window count as coming from it.
+ */
+export interface EntryTracking {
+  /** Miaoda app id (`app_…`) holding the visit table. */
+  miaodaAppId: string;
+  /** Visit table; default `alice_visit`. */
+  table?: string;
+  /** How long after a visit the sender's private turns still count; default 120. */
+  windowMinutes?: number;
 }
 
 /** `access.publicDm`: who may open a private chat, and the limits there. */
@@ -566,6 +582,7 @@ function normalizeAccess(
   const guestToolGrants = normalizeChatUserMap(access?.guestToolGrants);
   const restrictedChats = normalizeRestrictedChats(access?.restrictedChats);
   const publicDm = normalizePublicDm(access?.publicDm);
+  const entryTracking = normalizeEntryTracking(access?.entryTracking);
   return {
     allowedUsers: stringArray(access?.allowedUsers),
     allowedChats: stringArray(access?.allowedChats),
@@ -583,6 +600,24 @@ function normalizeAccess(
     ...(Object.keys(guestToolGrants).length > 0 ? { guestToolGrants } : {}),
     ...(Object.keys(restrictedChats).length > 0 ? { restrictedChats } : {}),
     ...(publicDm ? { publicDm } : {}),
+    ...(entryTracking ? { entryTracking } : {}),
+  };
+}
+
+/** `access.entryTracking`, or undefined when absent or malformed. */
+function normalizeEntryTracking(value: unknown): EntryTracking | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const raw = value as Record<string, unknown>;
+  if (typeof raw.miaodaAppId !== 'string' || !/^app_[0-9a-z]+$/.test(raw.miaodaAppId)) return undefined;
+  const table = typeof raw.table === 'string' && /^[a-z_][a-z0-9_]*$/.test(raw.table) ? raw.table : undefined;
+  const windowMinutes =
+    typeof raw.windowMinutes === 'number' && raw.windowMinutes >= 1 && raw.windowMinutes <= 1440
+      ? Math.floor(raw.windowMinutes)
+      : undefined;
+  return {
+    miaodaAppId: raw.miaodaAppId,
+    ...(table ? { table } : {}),
+    ...(windowMinutes ? { windowMinutes } : {}),
   };
 }
 

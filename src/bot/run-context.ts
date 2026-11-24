@@ -22,6 +22,8 @@ export interface RunContext {
   publicDm: boolean;
   messageIds: string[];
   updatedAt: string;
+  /** Set (shortly after the turn starts) when the sender came in through an outside entry such as Alice. */
+  entry?: { source: string; visitedAt: string };
 }
 
 /** Tests point this elsewhere (tests/setup) so a suite run never writes the live profile's files. */

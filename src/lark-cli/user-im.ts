@@ -74,7 +74,7 @@ export type LarkCliExec = (
   timeoutMs: number,
 ) => Promise<ExecResult>;
 
-const defaultExec: LarkCliExec = (args, env, timeoutMs) =>
+export const defaultLarkCliExec: LarkCliExec = (args, env, timeoutMs) =>
   new Promise<ExecResult>((resolve) => {
     let stdout = '';
     let stderr = '';
@@ -99,7 +99,7 @@ const defaultExec: LarkCliExec = (args, env, timeoutMs) =>
     });
   });
 
-function larkCliEnv(ctx: UserImContext): NodeJS.ProcessEnv {
+export function larkCliEnv(ctx: UserImContext): NodeJS.ProcessEnv {
   const appPaths = resolveAppPaths({ rootDir: ctx.rootDir, profile: ctx.profile });
   return buildLarkChannelEnv({
     profile: appPaths.profile,
@@ -163,7 +163,7 @@ function findString(obj: unknown, re: RegExp, depth = 0): string | undefined {
 
 export async function getUserAuthStatus(
   ctx: UserImContext,
-  exec: LarkCliExec = defaultExec,
+  exec: LarkCliExec = defaultLarkCliExec,
 ): Promise<UserAuthStatus> {
   const r = await exec(['auth', 'status', '--json'], larkCliEnv(ctx), 15_000);
   const json = parseJson(r.stdout);
@@ -192,7 +192,7 @@ export function hasScope(status: UserAuthStatus, anyOf: string[]): boolean {
 export async function startDeviceLogin(
   ctx: UserImContext,
   scopes: string[] = LIST_CHAT_SCOPES,
-  exec: LarkCliExec = defaultExec,
+  exec: LarkCliExec = defaultLarkCliExec,
 ): Promise<DeviceLogin> {
   // Request exactly the scopes we need (not `--domain im`) so authorization
   // isn't rejected for unrelated un-grantable scopes like im:message.send_as_user.
@@ -237,7 +237,7 @@ export async function startDeviceLogin(
 export async function completeDeviceLogin(
   ctx: UserImContext,
   deviceCode: string,
-  exec: LarkCliExec = defaultExec,
+  exec: LarkCliExec = defaultLarkCliExec,
 ): Promise<{ ok: boolean; message?: string }> {
   const r = await exec(
     ['auth', 'login', '--device-code', deviceCode, '--json'],
@@ -291,7 +291,7 @@ function parseChatsPage(r: ExecResult, prefix: string): UserChatsPage {
 export async function listUserChats(
   ctx: UserImContext,
   opts: { pageSize?: number; pageToken?: string } = {},
-  exec: LarkCliExec = defaultExec,
+  exec: LarkCliExec = defaultLarkCliExec,
 ): Promise<UserChatsPage> {
   // active_time (descending) → most recently active groups first, which is far
   // more useful in a picker than the default create_time (oldest first).
@@ -314,7 +314,7 @@ export async function listUserChats(
 export async function searchUserChats(
   ctx: UserImContext,
   opts: { query: string; pageSize?: number; pageToken?: string },
-  exec: LarkCliExec = defaultExec,
+  exec: LarkCliExec = defaultLarkCliExec,
 ): Promise<UserChatsPage> {
   const args = [
     'im',
@@ -335,7 +335,7 @@ export async function addBotToChat(
   ctx: UserImContext,
   chatId: string,
   botAppId: string,
-  exec: LarkCliExec = defaultExec,
+  exec: LarkCliExec = defaultLarkCliExec,
 ): Promise<AddBotResult> {
   const r = await exec(
     [

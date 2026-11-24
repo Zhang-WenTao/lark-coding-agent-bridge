@@ -12,7 +12,8 @@ import type {
 } from '@larksuite/channel';
 import { createLarkChannel, normalize } from '@larksuite/channel';
 import { mkdirSync } from 'node:fs';
-import { writeRunContext } from './run-context';
+import { type RunContext, writeRunContext } from './run-context';
+import { entryTrackerFor } from './entry-tracker';
 import { dirname, join } from 'node:path';
 import { agentAccountName, startAgentWindowStagger } from '../agent/account';
 import { agentCapability } from '../agent/capability';
@@ -2351,7 +2352,7 @@ async function submitBatchRun(
   // Who started this turn and from where, for scripts the agent runs (the
   // device-command ledger): rewritten every batch, so a reused process reads
   // the current sender, not the one it was spawned for.
-  const runContextFile = writeRunContext(paths.appDir, {
+  const runContext: RunContext = {
     scope,
     chatId,
     mode: mode === 'p2p' ? 'p2p' : mode === 'topic' ? 'topic' : 'group',
@@ -2368,7 +2369,10 @@ async function submitBatchRun(
     publicDm: mode === 'p2p' && !ownerRun && Boolean(controls.profileConfig.access.publicDm?.enabled),
     messageIds: batch.map((m) => m.messageId),
     updatedAt: new Date().toISOString(),
-  });
+  };
+  const runContextFile = writeRunContext(paths.appDir, runContext);
+  // Alice entry: looked up after the turn starts, so it never delays the reply.
+  if (runContextFile) entryTrackerFor(controls.profileConfig.access.entryTracking)?.tagTurn(runContext);
   const runSubmittedAt = Date.now();
   const flow = await startRunFlow({
     scopeId: scope,
