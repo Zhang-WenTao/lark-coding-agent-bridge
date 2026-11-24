@@ -172,30 +172,47 @@ describe('an answer holding code, in card mode', () => {
   });
 });
 
+// A Claude-style run: a note, a tool call, then the answer.
+const NOTE = '我先看一下日志';
+const narratedRun = (answer: string): AgentEvent[] => [
+  { type: 'system', sessionId: 'sess-1' },
+  { type: 'text', delta: NOTE },
+  { type: 'tool_use', id: 't1', name: 'Bash', input: { command: 'tail app.log' } },
+  { type: 'tool_result', id: 't1', output: 'ok', isError: false },
+  { type: 'text', delta: answer },
+  { type: 'done', terminationReason: 'normal' },
+];
+
+/** Run one message to the end; the markdown bodies sent as standalone replies, and the CoT requests. */
+async function replyTo(mode: Mode, runEvents: AgentEvent[], preferences: Record<string, unknown> = {}) {
+  const h = await startHarness(mode, 'topic', { events: runEvents, preferences });
+  await h.channel.handlers.message?.(topicMessage('om_q'));
+  await waitFor(() => h.channel.reactions.some((r) => r.emoji === 'DONE'));
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  return {
+    sent: h.channel.sent.map((s) => (s.content as { markdown: string }).markdown),
+    cotBodies: h.cotRequests.map((r) => r.body).join('\n'),
+  };
+}
+
+describe('COT mode with tool calls', () => {
+  it('shows the notes in the bubble and replies with only the answer', async () => {
+    const { sent, cotBodies } = await replyTo('cot', narratedRun(ANSWER));
+    expect(cotBodies).toContain(NOTE);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toContain(ANSWER);
+    expect(sent[0]).not.toContain(NOTE);
+  });
+
+  it('posts nothing when the answer after the tool calls is [[NO_REPLY]]', async () => {
+    const { sent } = await replyTo('cot', narratedRun('[[NO_REPLY]]'));
+    expect(sent).toEqual([]);
+  });
+});
+
 describe('text mode with tool calls (textReplyFinalOnly)', () => {
-  const NOTE = '我先看一下日志';
-  const TOOL_EVENTS: AgentEvent[] = [
-    { type: 'tool_use', id: 't1', name: 'Bash', input: { command: 'tail app.log' } },
-    { type: 'tool_result', id: 't1', output: 'ok', isError: false },
-  ];
-  const events = (answer: string): AgentEvent[] => [
-    { type: 'system', sessionId: 'sess-1' },
-    { type: 'text', delta: NOTE },
-    ...TOOL_EVENTS,
-    { type: 'text', delta: answer },
-    { type: 'done', terminationReason: 'normal' },
-  ];
-
-  async function replyTo(runEvents: AgentEvent[], preferences: Record<string, unknown> = {}) {
-    const h = await startHarness('text', 'topic', { events: runEvents, preferences });
-    await h.channel.handlers.message?.(topicMessage('om_q'));
-    await waitFor(() => h.channel.reactions.some((r) => r.emoji === 'DONE'));
-    await new Promise((resolve) => setTimeout(resolve, 80));
-    return h.channel.sent.map((s) => (s.content as { markdown: string }).markdown);
-  }
-
   it('posts only the answer after the last tool call', async () => {
-    const sent = await replyTo(events(ANSWER));
+    const { sent } = await replyTo('text', narratedRun(ANSWER));
     expect(sent).toHaveLength(1);
     expect(sent[0]).toContain(ANSWER);
     expect(sent[0]).not.toContain(NOTE);
@@ -203,7 +220,7 @@ describe('text mode with tool calls (textReplyFinalOnly)', () => {
   });
 
   it('posts the whole record when textReplyFinalOnly is off', async () => {
-    const sent = await replyTo(events(ANSWER), { textReplyFinalOnly: false });
+    const { sent } = await replyTo('text', narratedRun(ANSWER), { textReplyFinalOnly: false });
     expect(sent).toHaveLength(1);
     expect(sent[0]).toContain(NOTE);
     expect(sent[0]).toContain('tail app.log');
@@ -211,7 +228,8 @@ describe('text mode with tool calls (textReplyFinalOnly)', () => {
   });
 
   it('posts nothing when the answer after the tool calls is [[NO_REPLY]]', async () => {
-    expect(await replyTo(events('[[NO_REPLY]]'))).toEqual([]);
+    const { sent } = await replyTo('text', narratedRun('[[NO_REPLY]]'));
+    expect(sent).toEqual([]);
   });
 });
 

@@ -508,7 +508,7 @@ Jobs are stored per profile in `jobs.json` (see Data directories).
 - **Tool-call display**: controls whether tool blocks appear in the final card / markdown reply.
 - **COT process message**: `off` sends only the final reply; `brief` first sends a COT message with agent progress text and tool summaries; `detailed` also includes tool args and truncated output.
 
-When COT is enabled, the bridge splits the process view and final answer into two messages. The COT message is for tracing what the agent did; the final answer is still generated from the agent's raw text, without heuristic bridge-side filtering. If an agent emits final-answer text as ordinary stream text, that text can also appear in the COT process message.
+When COT is enabled, the bridge splits the process view and final answer into two messages. The COT message is for tracing what the agent did, and the agent's notes between tool calls appear only there. The final-answer message carries just what the agent wrote after its last tool call, or the final answer the agent reported on its own (Codex). The cut follows the same rule as plain text mode below: by event structure, not a guess at the wording; an answer of `[[NO_REPLY]]` means no reply. The COT message streams all of the agent's text, so the answer also appears there once.
 
 **Plain text mode sends only the final answer**: the run posts one message, and while it works only the Typing reaction shows. So by default the message carries just what the agent wrote after its last tool call, the answer it gives once its work is done. Notes between tool calls ("let me check the logs…") and tool lines are left out. The cut follows the event structure, not a guess at the wording.
 
@@ -518,7 +518,7 @@ When COT is enabled, the bridge splits the process view and final answer into tw
 - Follow-up replies from background work get the same treatment: the background-work prefix plus that turn's answer.
 - Codex already posts its final answer apart and always sends just the answer in plain text mode; this setting does not apply to it.
 
-To get the full record back (the notes, plus tool lines while tool-call display is on), set the profile's `preferences.textReplyFinalOnly` to `false`. Config file only (restart the profile after editing). Card, markdown and COT modes are unaffected.
+To get the full record back (the notes, plus tool lines while tool-call display is on), set the profile's `preferences.textReplyFinalOnly` to `false`. Config file only (restart the profile after editing). The setting covers plain text mode only: for COT mode's final answer see above; card and markdown modes are unchanged.
 
 ### Long-run completion notice
 
