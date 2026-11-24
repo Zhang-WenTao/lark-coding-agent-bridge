@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { AgentEvent } from '../../../src/agent/types';
-import { finalCardText, hasTable, needsHeader, renderFinalCard } from '../../../src/card/final-card';
+import { answerTopic, finalCardText, hasTable, needsHeader, renderFinalCard } from '../../../src/card/final-card';
 import { finalAnswerState, initialState, reduce, type RunState } from '../../../src/card/run-state';
 import { getFinalCardPreference, type AppConfig } from '../../../src/config/schema';
 
@@ -11,7 +11,7 @@ const answer = (text: string): RunState => run([{ type: 'text', delta: text }, d
 
 interface Card {
   config: { summary: { content: string }; streaming_mode?: boolean };
-  header?: { template: string; title: { content: string } };
+  header?: { template: string; title: { content: string }; icon?: unknown };
   body: { elements: Array<{ tag: string; content?: string; text_size?: string }> };
 }
 const render = (state: RunState, opts: Partial<Parameters<typeof renderFinalCard>[1]> = {}): Card =>
@@ -31,18 +31,44 @@ describe('final card', () => {
     for (const absent of ['button', 'Agent:', 'Model:', 'Sponsor', 'Usage', 'hr']) expect(json).not.toContain(absent);
   });
 
-  it('adds a header bar in the configured colour for a long answer or a table', () => {
+  it('adds a header bar in the configured colour, titled with the topic, for a long answer or a table', () => {
     const long = render(answer(LONG));
-    expect(long.header).toEqual({ template: 'violet', title: { tag: 'plain_text', content: 'Paloma' } });
+    expect(long.header).toEqual({ template: 'violet', title: { tag: 'plain_text', content: '第 1 行' } });
 
-    const table = render(answer(`三个区的对比：\n\n${TABLE}`), { headerTemplate: 'indigo' });
-    expect(table.header?.template).toBe('indigo');
+    const table = render(answer(`三个区的对比：\n\n${TABLE}`), { headerTemplate: 'green' });
+    expect(table.header).toEqual({ template: 'green', title: { tag: 'plain_text', content: '三个区的对比' } });
+    // The opening sentence stays in the body: it is the answer, not a heading.
+    expect(table.body.elements[0]?.content?.startsWith('三个区的对比：')).toBe(true);
+  });
+
+  it('falls back to the bot name when the answer opens with a table', () => {
+    expect(render(answer(TABLE)).header?.title.content).toBe('Paloma');
+  });
+
+  it('puts the configured avatar in the header, and nowhere on a short answer', () => {
+    const icon = { tag: 'custom_icon', img_key: 'img_v3_avatar' };
+    expect(render(answer(LONG), { headerIcon: 'img_v3_avatar' }).header?.icon).toEqual(icon);
+    expect(render(answer(LONG)).header?.icon).toBeUndefined();
+    expect(JSON.stringify(render(answer('ok'), { headerIcon: 'img_v3_avatar' }))).not.toContain('img_v3_avatar');
   });
 
   it('takes the title from a leading heading and leaves it out of the body', () => {
     const card = render(answer(`## antelope 三区对比\n\n${TABLE}`));
     expect(card.header?.title.content).toBe('antelope 三区对比');
     expect(card.body.elements[0]?.content?.startsWith('| 区域')).toBe(true);
+  });
+
+  it('reads a short topic off the answer', () => {
+    expect(answerTopic('## 三个生产区 Pod 与发布对比\n\n正文')).toEqual({ title: '三个生产区 Pod 与发布对比', rest: '正文' });
+    expect(answerTopic('**prod-us 落后两个版本**。其余正常')?.title).toBe('prod-us 落后两个版本');
+    expect(answerTopic('- 先看结论：都正常')?.title).toBe('先看结论');
+    // A long opening sentence is cut at its first comma, then to the title
+    // limit — at a word boundary, never inside `pod`.
+    expect(answerTopic('三个生产区里只有 prod-us 有一个 pod 处于 Pending 状态，原因是节点资源不足，其余都正常。')?.title).toBe(
+      '三个生产区里只有 prod-us 有一个…',
+    );
+    expect(answerTopic(TABLE)).toBeUndefined();
+    expect(answerTopic('```\ncode\n```')).toBeUndefined();
   });
 
   it('decides on the header by the answer itself', () => {
@@ -109,8 +135,13 @@ describe('final card', () => {
 describe('finalCard preference', () => {
   const cfg = (finalCard: unknown): AppConfig => ({ preferences: { finalCard } }) as unknown as AppConfig;
 
-  it('defaults to a violet header and no footer', () => {
+  it('defaults to a violet header, no icon and no footer', () => {
     expect(getFinalCardPreference(cfg(undefined))).toEqual({ headerTemplate: 'violet', footer: false });
+  });
+
+  it('takes the header icon image key, ignoring a blank one', () => {
+    expect(getFinalCardPreference(cfg({ headerIcon: ' img_v3_x ' })).headerIcon).toBe('img_v3_x');
+    expect(getFinalCardPreference(cfg({ headerIcon: '  ' })).headerIcon).toBeUndefined();
   });
 
   it('keeps a known colour and falls back on an unknown one', () => {

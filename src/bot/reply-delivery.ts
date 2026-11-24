@@ -9,7 +9,7 @@ import { renderCard } from '../card/run-renderer';
 import type { RunActivity, RunCardRenderOptions } from '../card/run-renderer';
 import { backgroundLeft, type Block, type RunState } from '../card/run-state';
 import { renderText } from '../card/text-renderer';
-import type { FinalCardPreference, getMessageReplyMode } from '../config/schema';
+import type { getMessageReplyMode, ResolvedFinalCard } from '../config/schema';
 import { log } from '../core/logger';
 import type { RunHandle } from '../runtime/active-runs';
 import { larkErrorCode } from './card-patch-health';
@@ -364,7 +364,7 @@ export async function sendFinalReply(input: {
   sendOpts: { replyTo: string; replyInThread?: boolean };
   cardRenderOptions: RunCardRenderOptions;
   /** `final-card` appearance (`preferences.finalCard`); defaults when absent. */
-  finalCard?: Required<FinalCardPreference>;
+  finalCard?: ResolvedFinalCard;
 }): Promise<void> {
   const body = renderText(input.state, input.cardRenderOptions.locale);
 
@@ -441,12 +441,13 @@ async function sendFinalCard(
   input: Parameters<typeof sendFinalReply>[0],
   body: string,
 ): Promise<void> {
-  const pref = input.finalCard ?? { headerTemplate: 'violet' as const, footer: false };
+  const pref: ResolvedFinalCard = input.finalCard ?? { headerTemplate: 'violet', footer: false };
   const meta = input.cardRenderOptions.meta;
   const locale = input.cardRenderOptions.locale;
   const card = renderFinalCard(input.state, {
     botName: meta?.title ?? '',
     headerTemplate: pref.headerTemplate,
+    ...(pref.headerIcon ? { headerIcon: pref.headerIcon } : {}),
     ...(pref.footer && meta?.model ? { footerModel: meta.model } : {}),
     ...(locale ? { locale } : {}),
   });

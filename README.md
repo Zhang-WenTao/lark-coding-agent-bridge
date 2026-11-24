@@ -523,7 +523,12 @@ To get the full record back (the notes, plus tool lines while tool-call display 
 **Result card** (`messageReply: "final-card"`, 「结果卡片」 in `/config`): like plain text mode, nothing is posted while the run works, only the Typing reaction. When it is done, one non-streaming card goes out holding only the final answer, cut the same way as in plain text mode. There is no stop button, clock, tool block or reasoning on it, no Agent / Model / Usage / Sponsor byline, and no new-conversation or account-switch notice.
 
 - A short answer (6 lines or fewer, no table) has no header bar and reads like a message.
-- A long answer (more than 6 lines, or a table) gets a header bar: the answer's leading `#` heading if it opens with one, else the bot's name.
+- A long answer (more than 6 lines, or a table) gets a header bar titled with the answer's topic, not the bot's name (the sender line already shows that):
+  - the answer's leading `#` / `##` / `###` heading, which then leaves the body;
+  - else its opening sentence, up to the first full stop or colon, cut at the first comma when long, at most 24 characters;
+  - the bot's name only when the answer opens with a table or code.
+
+  For sharper titles, have the agent's reply style open long answers with a `## topic` line.
 - A run that did not finish (stopped, failed, paused for quota, idle timeout) gets one small grey line saying why under the answer, never a block of error text.
 - An answer of `[[NO_REPLY]]` gets no reply.
 - A card over Feishu's size limit, or one Feishu refuses (too many tables, say), goes out as a plain-text post instead, so the answer is not lost.
@@ -533,10 +538,11 @@ To get the full record back (the notes, plus tool lines while tool-call display 
 Its look is set in the config file only (the profile's `preferences.finalCard`; restart the profile after editing):
 
 ```json
-"finalCard": { "headerTemplate": "violet", "footer": false }
+"finalCard": { "headerTemplate": "violet", "headerIcon": "img_v3_xxx", "footer": false }
 ```
 
-- `headerTemplate`: the header bar colour, one of Feishu's card templates (`blue`, `wathet`, `turquoise`, `green`, `yellow`, `orange`, `red`, `carmine`, `violet`, `purple`, `indigo`, `grey`, `default`). Default `violet`; any other value is treated as `violet`.
+- `headerTemplate`: the header bar colour, one of Feishu's card templates (`blue`, `wathet`, `turquoise`, `green`, `yellow`, `orange`, `red`, `carmine`, `violet`, `purple`, `indigo`, `grey`, `default`). Default `violet`; any other value is treated as `violet`. Feishu allows only these presets for the header: neither the bar nor its title takes a custom colour.
+- `headerIcon`: an image key shown at the left of the header bar, such as the bot's avatar. Upload it with the bot's own app (`im/v1/images`, `image_type` `message`). Default: no icon.
 - `footer`: `true` adds one small grey line under the answer with the model name. Default off.
 
 ### Long-run completion notice

@@ -523,7 +523,12 @@ Web 控制台「配置」页有「课堂精练」卡片：显示目标仓库、�
 **结果卡片**（`messageReply: "final-card"`，`/config` 里选「结果卡片」）：跑的过程中和纯文本一样，什么都不发，只有「敲键盘」表情；跑完发一张非流式的卡片，正文只有最终答案，取法和纯文本模式相同。卡片上没有停止按钮、计时、工具块、思考过程，也没有 Agent / Model / Usage / Sponsor 署名、新会话或账户切换的提示。
 
 - 短回答（不超过 6 行、没有表格）：没有标题栏，看起来就是一条消息。
-- 长回答（超过 6 行，或带表格）：加标题栏。答案以 `#` 标题开头时，用这个标题当标题栏，否则用 bot 名。
+- 长回答（超过 6 行，或带表格）：加标题栏，标题写这次回答的主题，不写 bot 名（发送人那一栏已经显示了）。取法：
+  - 答案以 `#` / `##` / `###` 标题开头时，用这个标题，并把它从正文里去掉。
+  - 否则取开头第一句，截到句号或冒号为止；太长就截到第一个逗号，最多 24 字。
+  - 答案一开头就是表格或代码时，才用 bot 名。
+
+  想让标题更准，可以在 agent 的说话规范里约定：长回答第一行写 `## 主题`。
 - 没跑完（中断、出错、额度暂停、无响应超时）：答案下面一行灰色小字说明原因，不贴大段报错。
 - 答案是 `[[NO_REPLY]]`：不回复。
 - 卡片超过飞书的大小限制或被飞书拒收（例如表格太多）：改发一条纯文本，答案不丢。
@@ -533,10 +538,11 @@ Web 控制台「配置」页有「课堂精练」卡片：显示目标仓库、�
 外观只能改配置文件（profile 的 `preferences.finalCard`，改完重启该 profile 生效）：
 
 ```json
-"finalCard": { "headerTemplate": "violet", "footer": false }
+"finalCard": { "headerTemplate": "violet", "headerIcon": "img_v3_xxx", "footer": false }
 ```
 
-- `headerTemplate`：标题栏颜色，取飞书卡片的模板色（`blue`、`wathet`、`turquoise`、`green`、`yellow`、`orange`、`red`、`carmine`、`violet`、`purple`、`indigo`、`grey`、`default`），默认 `violet`。填了别的值也按 `violet` 处理。
+- `headerTemplate`：标题栏颜色，取飞书卡片的模板色（`blue`、`wathet`、`turquoise`、`green`、`yellow`、`orange`、`red`、`carmine`、`violet`、`purple`、`indigo`、`grey`、`default`），默认 `violet`。填了别的值也按 `violet` 处理。飞书卡片的标题栏只能用这些预设色，背景和标题文字都不支持自定义颜色。
+- `headerIcon`：标题栏左侧的图标，填图片的 image_key，比如 bot 的头像。要用 bot 自己的应用上传（`im/v1/images` 接口，`image_type` 为 `message`）。默认不加图标。
 - `footer`：为 `true` 时在答案下面加一行灰色小字，写模型名。默认关。
 
 ### 长任务完成提醒

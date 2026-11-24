@@ -12,20 +12,23 @@ import { backgroundLeft, type RunState } from './run-state';
  * only (`finalAnswerState`, then the prefs filter).
  *
  * A short answer is just the text, like a chat message. A long one (more than
- * {@link FINAL_CARD_HEADER_AFTER_LINES} lines, or a table) gets a header bar:
- * its leading heading if it opens with one, else the bot's name.
+ * {@link FINAL_CARD_HEADER_AFTER_LINES} lines, or a table) gets a header bar
+ * titled with what the answer is about (see {@link answerTopic}) — not the
+ * bot's name, which the message's sender line already shows.
  */
 
 /** Answers longer than this many non-blank lines get a header bar. */
 export const FINAL_CARD_HEADER_AFTER_LINES = 6;
-const TITLE_MAX = 40;
+const TITLE_MAX = 24;
 const SUMMARY_MAX = 60;
 const ERROR_MAX = 80;
 
 export interface FinalCardOptions {
-  /** Header title when the answer does not open with a heading. */
+  /** Header title of last resort, when no topic can be read off the answer. */
   botName: string;
   headerTemplate: CardHeaderTemplate;
+  /** Image key for the header icon (the bot's avatar). */
+  headerIcon?: string;
   /** Model name for the optional grey footer line; none when absent. */
   footerModel?: string;
   locale?: Locale;
@@ -39,9 +42,9 @@ export function renderFinalCard(state: RunState, opts: FinalCardOptions): object
 
   let title: string | undefined;
   if (answer && needsHeader(answer)) {
-    const heading = leadingHeading(answer);
-    title = heading?.title ?? (opts.botName.trim() || runStrings(opts.locale).summary.done);
-    if (heading) answer = heading.rest;
+    const topic = answerTopic(answer);
+    title = topic?.title ?? (opts.botName.trim() || runStrings(opts.locale).summary.done);
+    if (topic?.rest !== undefined) answer = topic.rest;
   }
 
   const elements: object[] = [];
@@ -53,7 +56,13 @@ export function renderFinalCard(state: RunState, opts: FinalCardOptions): object
     schema: '2.0',
     config: { width_mode: 'fill', summary: { content: summaryOf(title ?? answer, status) } },
     ...(title
-      ? { header: { template: opts.headerTemplate, title: { tag: 'plain_text', content: title } } }
+      ? {
+          header: {
+            template: opts.headerTemplate,
+            title: { tag: 'plain_text', content: title },
+            ...(opts.headerIcon ? { icon: { tag: 'custom_icon', img_key: opts.headerIcon } } : {}),
+          },
+        }
       : {}),
     body: { elements },
   });
@@ -111,13 +120,30 @@ export function hasTable(answer: string): boolean {
   return false;
 }
 
-function leadingHeading(answer: string): { title: string; rest: string } | undefined {
-  const [first, ...rest] = answer.split('\n');
-  const match = /^#{1,3}\s+(.+?)\s*#*\s*$/.exec(first ?? '');
-  const body = rest.join('\n').trim();
-  if (!match?.[1] || !body) return undefined;
-  const title = truncate(plain(match[1]), TITLE_MAX);
-  return title ? { title, rest: body } : undefined;
+/**
+ * What the answer is about, as a short header title:
+ *  1. its leading `#` / `##` / `###` heading — the agent can open a long
+ *     answer with one to name it; the heading then leaves the body (`rest`);
+ *  2. else its opening sentence: the first line of prose (not a table row or
+ *     code fence), up to the first full stop or colon, or up to the first
+ *     comma when the sentence is long; cut at {@link TITLE_MAX} characters.
+ * Undefined when the answer opens with a table or code, so the caller falls
+ * back to the bot's name.
+ */
+export function answerTopic(answer: string): { title: string; rest?: string } | undefined {
+  const lines = answer.split('\n');
+  const first = lines.find((line) => line.trim()) ?? '';
+  const heading = /^\s*#{1,3}\s+(.+?)\s*#*\s*$/.exec(first);
+  if (heading?.[1]) {
+    const body = lines.slice(lines.indexOf(first) + 1).join('\n').trim();
+    const title = truncateTitle(plain(heading[1]));
+    if (title && body) return { title, rest: body };
+  }
+  if (/^\s*(\||```)/.test(first)) return undefined;
+  const sentence = plain(first).split(/[。！？!?；;：:]/)[0]?.trim() ?? '';
+  const clause = sentence.length > TITLE_MAX ? (sentence.split(/[，,]/)[0]?.trim() ?? '') : sentence;
+  const title = truncateTitle(clause.length >= 2 ? clause : sentence);
+  return title ? { title } : undefined;
 }
 
 function greyLine(text: string): object {
@@ -145,6 +171,15 @@ function oneLine(text: string): string {
     .map((line) => line.trim())
     .filter(Boolean)
     .join(' ');
+}
+
+/** Cut to {@link TITLE_MAX}, backing off to a word boundary rather than splitting a Latin word. */
+function truncateTitle(text: string): string {
+  if (text.length <= TITLE_MAX) return text;
+  const word = /[A-Za-z0-9_-]/;
+  let cut = TITLE_MAX - 1;
+  while (cut > TITLE_MAX / 2 && word.test(text[cut - 1] ?? '') && word.test(text[cut] ?? '')) cut--;
+  return `${text.slice(0, cut).trimEnd()}…`;
 }
 
 function truncate(text: string, max: number): string {

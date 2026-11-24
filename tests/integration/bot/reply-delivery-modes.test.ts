@@ -240,10 +240,10 @@ describe('final-card mode', () => {
     expect(json).not.toContain('tail app.log');
   });
 
-  it('gives a long answer a violet header with the bot name', async () => {
+  it('gives a long answer a violet header titled with its topic', async () => {
     const { h } = await run('topic', narratedRun(`三个区：\n\n| 区 | Pod |\n|---|---|\n| eur | 12 |`));
     const card = (h.channel.sent[0]!.content as { card: Card }).card;
-    expect(card.header).toEqual({ template: 'violet', title: { tag: 'plain_text', content: 'Bridge' } });
+    expect(card.header).toEqual({ template: 'violet', title: { tag: 'plain_text', content: '三个区' } });
   });
 
   it('posts nothing when the answer after the tool calls is [[NO_REPLY]]', async () => {
