@@ -11,6 +11,7 @@ import type {
   NormalizedMessage,
 } from '@larksuite/channel';
 import { createLarkChannel, normalize } from '@larksuite/channel';
+import { mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { agentAccountName, startAgentWindowStagger } from '../agent/account';
 import { agentCapability } from '../agent/capability';
@@ -110,6 +111,7 @@ import {
   guestAccessInstruction,
   guestRunGuard,
   isOwnerBatch,
+  publicDmLimits,
   restrictedChatGuard,
   restrictedChatInstruction,
   restrictedChatWorkspace,
@@ -2081,8 +2083,6 @@ async function prepareBatchPrompt(
   const modelSwitched = prevModel !== undefined && prevModel !== modelSelection;
   lastRunModelByScope.set(scope, modelSelection);
   const smartSession = getSmartSession(controls.cfg);
-  // A restricted chat fences every run there, the owner's included.
-  const restrictedChat = controls.profileConfig.access.restrictedChats?.[chatId];
   const editedIds = batch.filter(isEdited).map((m) => m.messageId);
   // This batch goes to a process still running background tasks for earlier
   // messages (RunExecutor reuses it): their reports may land in this turn.
@@ -2096,8 +2096,16 @@ async function prepareBatchPrompt(
   // Changes to the bridge and the agent itself are the owner's alone: other
   // people's runs are told so and fenced off at the tool level.
   const ownerRun = isOwnerBatch(controls, batch, (m) => senderTypeOf(m) === 'bot');
+  // A restricted chat fences every run there, the owner's included; with
+  // private chats open to everyone, someone else's private chat is fenced too.
+  const restrictedChat =
+    controls.profileConfig.access.restrictedChats?.[chatId] ??
+    (firstMsg.chatType === 'p2p' && !ownerRun
+      ? publicDmLimits(controls.profileConfig.access, batch, chatId)
+      : undefined);
   // Someone else's run may only touch what the owner opened to others.
   const restrictedCwd = restrictedChat ? restrictedChatWorkspace(restrictedChat) : undefined;
+  if (restrictedCwd) mkdirSync(restrictedCwd, { recursive: true });
   const guestWorkspace = restrictedCwd ?? workspaces.cwdFor(scope) ?? controls.profileConfig.workspaces.default;
   const guestGuard = ownerRun
     ? undefined

@@ -17,6 +17,7 @@ export interface AccessDecision {
     | 'owner'
     | 'allowed-team'
     | 'allowed-user'
+    | 'allowed-public-dm'
     | 'allowed-admin'
     | 'allowed-chat'
     | 'allowed-chat-user'
@@ -47,6 +48,8 @@ export function canUseDm(
   if (profile.mode === 'team') return allow('allowed-team');
   if (profile.access.allowedUsers.includes(senderId)) return allow('allowed-user');
   if (profile.access.admins.includes(senderId)) return allow('allowed-admin');
+  // Open to everyone; the run is fenced by `access.publicDm` (see publicDmLimits).
+  if (profile.access.publicDm?.enabled) return allow('allowed-public-dm');
   return deny('denied-user');
 }
 

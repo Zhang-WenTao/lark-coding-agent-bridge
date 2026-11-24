@@ -87,6 +87,21 @@ export interface ProfileAccess {
    * answer and the rules behind it stay unexplained. Omitted when empty.
    */
   restrictedChats?: Record<string, RestrictedChat>;
+  /**
+   * Private chats opened to everyone who can reach the bot (e.g. from a
+   * company portal link), not only `allowedUsers`. Every private-chat run the
+   * owner did not start — allowlisted people's included — is then fenced by
+   * these limits, the same way a restricted chat is. Omitted when unset.
+   */
+  publicDm?: PublicDm;
+}
+
+/** `access.publicDm`: who may open a private chat, and the limits there. */
+export interface PublicDm extends RestrictedChat {
+  /** Anyone may start a private chat; off keeps the allowlist as before. */
+  enabled: boolean;
+  /** open_ids whose private-chat runs skip these limits (still guest runs). */
+  exemptUsers?: string[];
 }
 
 /** Extra limits for every run in one chat (`access.restrictedChats`). */
@@ -545,6 +560,7 @@ function normalizeAccess(
   const guestDeniedCommands = stringArray(access?.guestDeniedCommands);
   const guestToolGrants = normalizeChatUserMap(access?.guestToolGrants);
   const restrictedChats = normalizeRestrictedChats(access?.restrictedChats);
+  const publicDm = normalizePublicDm(access?.publicDm);
   return {
     allowedUsers: stringArray(access?.allowedUsers),
     allowedChats: stringArray(access?.allowedChats),
@@ -561,6 +577,7 @@ function normalizeAccess(
     ...(guestDeniedCommands.length > 0 ? { guestDeniedCommands } : {}),
     ...(Object.keys(guestToolGrants).length > 0 ? { guestToolGrants } : {}),
     ...(Object.keys(restrictedChats).length > 0 ? { restrictedChats } : {}),
+    ...(publicDm ? { publicDm } : {}),
   };
 }
 
@@ -569,28 +586,47 @@ function normalizeRestrictedChats(input: unknown): Record<string, RestrictedChat
   if (!input || typeof input !== 'object' || Array.isArray(input)) return {};
   const out: Record<string, RestrictedChat> = {};
   for (const [chatId, value] of Object.entries(input as Record<string, unknown>)) {
-    if (!chatId || !value || typeof value !== 'object' || Array.isArray(value)) continue;
-    const raw = value as Record<string, unknown>;
-    const deniedPaths = stringArray(raw.deniedPaths);
-    const readOnlyPaths = stringArray(raw.readOnlyPaths);
-    const deniedTools = stringArray(raw.deniedTools);
-    const grantedCommands = stringArray(raw.grantedCommands);
-    const text = (v: unknown): string | undefined => (typeof v === 'string' && v.trim() ? v.trim() : undefined);
-    const workspace = text(raw.workspace);
-    const refusal = text(raw.refusal);
-    const instruction = text(raw.instruction);
-    out[chatId] = {
-      deniedCommands: stringArray(raw.deniedCommands),
-      ...(grantedCommands.length > 0 ? { grantedCommands } : {}),
-      ...(deniedPaths.length > 0 ? { deniedPaths } : {}),
-      ...(readOnlyPaths.length > 0 ? { readOnlyPaths } : {}),
-      ...(deniedTools.length > 0 ? { deniedTools } : {}),
-      ...(workspace ? { workspace } : {}),
-      ...(refusal ? { refusal } : {}),
-      ...(instruction ? { instruction } : {}),
-    };
+    if (!chatId) continue;
+    const chat = normalizeRestrictedChat(value);
+    if (chat) out[chatId] = chat;
   }
   return out;
+}
+
+function normalizeRestrictedChat(value: unknown): RestrictedChat | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const raw = value as Record<string, unknown>;
+  const deniedPaths = stringArray(raw.deniedPaths);
+  const readOnlyPaths = stringArray(raw.readOnlyPaths);
+  const deniedTools = stringArray(raw.deniedTools);
+  const grantedCommands = stringArray(raw.grantedCommands);
+  const text = (v: unknown): string | undefined => (typeof v === 'string' && v.trim() ? v.trim() : undefined);
+  const workspace = text(raw.workspace);
+  const refusal = text(raw.refusal);
+  const instruction = text(raw.instruction);
+  return {
+    deniedCommands: stringArray(raw.deniedCommands),
+    ...(grantedCommands.length > 0 ? { grantedCommands } : {}),
+    ...(deniedPaths.length > 0 ? { deniedPaths } : {}),
+    ...(readOnlyPaths.length > 0 ? { readOnlyPaths } : {}),
+    ...(deniedTools.length > 0 ? { deniedTools } : {}),
+    ...(workspace ? { workspace } : {}),
+    ...(refusal ? { refusal } : {}),
+    ...(instruction ? { instruction } : {}),
+  };
+}
+
+/** `access.publicDm`, or undefined when absent or malformed. */
+function normalizePublicDm(value: unknown): PublicDm | undefined {
+  const chat = normalizeRestrictedChat(value);
+  if (!chat) return undefined;
+  const raw = value as Record<string, unknown>;
+  const exemptUsers = stringArray(raw.exemptUsers);
+  return {
+    enabled: raw.enabled === true,
+    ...chat,
+    ...(exemptUsers.length > 0 ? { exemptUsers } : {}),
+  };
 }
 
 /** Keep only string→boolean entries; drop anything malformed. */

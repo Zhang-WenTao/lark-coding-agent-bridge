@@ -297,6 +297,25 @@ export function guestAccessInstruction(guard: RunGuard): string | undefined {
   ].join('\n');
 }
 
+/**
+ * The limits for a private-chat run the owner did not start, when private
+ * chats are open to everyone (`access.publicDm.enabled`). Undefined when that
+ * is off, or when every sender of the batch is exempt. A pinned workspace gets
+ * one sub-directory per chat, so one person's exports never meet another's.
+ */
+export function publicDmLimits(
+  access: ProfileAccess,
+  batch: readonly NormalizedMessage[],
+  chatId: string,
+): RestrictedChat | undefined {
+  const dm = access.publicDm;
+  if (!dm?.enabled) return undefined;
+  const exempt = dm.exemptUsers ?? [];
+  if (batch.length > 0 && batch.every((m) => exempt.includes(m.senderId))) return undefined;
+  const { enabled: _enabled, exemptUsers: _exempt, ...chat } = dm;
+  return chat.workspace ? { ...chat, workspace: join(chat.workspace, chatId) } : chat;
+}
+
 /** The working directory a restricted chat pins, `~` expanded. */
 export function restrictedChatWorkspace(chat: RestrictedChat, home: string = homedir()): string | undefined {
   const p = chat.workspace;
