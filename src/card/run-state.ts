@@ -344,7 +344,8 @@ export function stripControlMarkers(state: RunState): RunState {
 
 /**
  * The run cut down to the answer it ends on, for a reply posted once at the
- * end (text mode): the final text when the agent reported one (Codex), else
+ * end (text mode, and the answer after a CoT bubble, which already showed
+ * the work): the final text when the agent reported one (Codex), else
  * the text after the last tool call — what the agent wrote once its work was
  * done. Claude never reports a final text, so without this cut its notes
  * between tool calls ("我先看一下…") end up in the reply.

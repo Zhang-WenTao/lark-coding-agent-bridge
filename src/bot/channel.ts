@@ -2810,11 +2810,14 @@ async function deliverRunReply(
         });
       }
       run.answerIsNewMessage = true;
+      // The bubble showed the work, notes between tool calls included; the
+      // reply carries the answer the run ends on. Cut before stripping
+      // markers so a [[NO_REPLY]] answer stays the answer (see finalAnswerState).
       await sendFinalReply({
         channel,
         chatId,
         scope,
-        state: finalAnswerOnlyState(stripControlMarkers((run.lastRawState = finalState))),
+        state: stripControlMarkers(finalAnswerState((run.lastRawState = finalState))),
         replyMode,
         sendOpts,
         cardRenderOptions,
