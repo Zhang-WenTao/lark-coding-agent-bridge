@@ -141,7 +141,54 @@ describe('reply delivery by mode', () => {
   });
 });
 
-async function startHarness(mode: Mode, where: Where): Promise<{
+describe('text mode with tool calls (textReplyFinalOnly)', () => {
+  const NOTE = '我先看一下日志';
+  const TOOL_EVENTS: AgentEvent[] = [
+    { type: 'tool_use', id: 't1', name: 'Bash', input: { command: 'tail app.log' } },
+    { type: 'tool_result', id: 't1', output: 'ok', isError: false },
+  ];
+  const events = (answer: string): AgentEvent[] => [
+    { type: 'system', sessionId: 'sess-1' },
+    { type: 'text', delta: NOTE },
+    ...TOOL_EVENTS,
+    { type: 'text', delta: answer },
+    { type: 'done', terminationReason: 'normal' },
+  ];
+
+  async function replyTo(runEvents: AgentEvent[], preferences: Record<string, unknown> = {}) {
+    const h = await startHarness('text', 'topic', { events: runEvents, preferences });
+    await h.channel.handlers.message?.(topicMessage('om_q'));
+    await waitFor(() => h.channel.reactions.some((r) => r.emoji === 'DONE'));
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    return h.channel.sent.map((s) => (s.content as { markdown: string }).markdown);
+  }
+
+  it('posts only the answer after the last tool call', async () => {
+    const sent = await replyTo(events(ANSWER));
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toContain(ANSWER);
+    expect(sent[0]).not.toContain(NOTE);
+    expect(sent[0]).not.toContain('tail app.log');
+  });
+
+  it('posts the whole record when textReplyFinalOnly is off', async () => {
+    const sent = await replyTo(events(ANSWER), { textReplyFinalOnly: false });
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toContain(NOTE);
+    expect(sent[0]).toContain('tail app.log');
+    expect(sent[0]).toContain(ANSWER);
+  });
+
+  it('posts nothing when the answer after the tool calls is [[NO_REPLY]]', async () => {
+    expect(await replyTo(events('[[NO_REPLY]]'))).toEqual([]);
+  });
+});
+
+async function startHarness(
+  mode: Mode,
+  where: Where,
+  opts: { events?: AgentEvent[]; preferences?: Record<string, unknown> } = {},
+): Promise<{
   channel: FakeLarkChannel;
   agent: FakeAgentAdapter;
   sessions: SessionStore;
@@ -157,12 +204,13 @@ async function startHarness(mode: Mode, where: Where): Promise<{
       messageReply: mode === 'cot' ? 'markdown' : mode,
       messageReplyMigrated: true,
       ...(mode === 'cot' ? { cotMessages: 'brief' as const } : {}),
+      ...opts.preferences,
     },
   });
   const profileConfig = { ...base, workspaces: { ...base.workspaces, default: workspace } };
   const sessions = new SessionStore(join(tmp.profile, 'sessions.json'));
   const workspaces = new WorkspaceStore(join(tmp.profile, 'workspaces.json'));
-  const agent = new FakeAgentAdapter({ events: RUN_EVENTS });
+  const agent = new FakeAgentAdapter({ events: opts.events ?? RUN_EVENTS });
   const channel = createFakeLarkChannel(where);
   sdkMock.channel = channel;
 

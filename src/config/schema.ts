@@ -138,6 +138,16 @@ export interface AppPreferences {
    */
   showToolCalls?: boolean;
   /**
+   * `messageReply: 'text'` only: post just the answer the run ends on (the
+   * text after its last tool call), not the notes the agent wrote between
+   * tool calls nor the tool lines. Text mode shows nothing while the run
+   * goes on, so the one message it posts reads as the reply. `false` posts
+   * the whole record again (notes, and tool lines unless `showToolCalls` is
+   * off). Agents that post their answer apart (Codex) always send just the
+   * answer in text mode. Config-file only. Default on.
+   */
+  textReplyFinalOnly?: boolean;
+  /**
    * Model the underlying agent runs with, forwarded as `--model`. The catalog
    * of valid values is agent-kind specific — see `agent/models.ts`. `undefined`
    * or the `'default'` sentinel means "don't pass `--model`" so the agent
@@ -725,6 +735,11 @@ export function getMessageReplyMode(cfg: AppConfig): MessageReplyMode {
 /** Resolve the show-tool-calls preference with default fallback. */
 export function getShowToolCalls(cfg: AppConfig): boolean {
   return cfg.preferences?.showToolCalls !== false;
+}
+
+/** Resolve the text-mode final-answer-only preference (default on). See `textReplyFinalOnly`. */
+export function getTextReplyFinalOnly(cfg: AppConfig): boolean {
+  return cfg.preferences?.textReplyFinalOnly !== false;
 }
 
 /**
