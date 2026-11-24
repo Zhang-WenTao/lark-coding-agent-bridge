@@ -82,6 +82,7 @@ import {
   CARD_HEARTBEAT_MS,
   createLazyProgressStream,
   deliverAnswerOutsideCard,
+  deliverCodeNatively,
   finalReplyState,
   opensProgressEagerly,
   pointerState,
@@ -534,7 +535,8 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
   );
   await modelPins.load();
   controls.modelPins = modelPins;
-  // 复制代码: finished cards' copy buttons carry a key into this store.
+  // 复制代码: the copy buttons on cards from before answers with code went out
+  // as posts carry a key into this store; kept so those buttons still work.
   const codeSnippets = deps.appPaths?.mediaDir
     ? new CodeSnippetStore(join(dirname(deps.appPaths.mediaDir), 'code-snippets.json'))
     : undefined;
@@ -2599,9 +2601,6 @@ async function submitBatchRun(
       provider: capability.descriptor.provider,
       ...(flow.rotated ? { notice: rotationNotice(flow.rotated) } : {}),
     },
-    ...(controls.codeSnippets
-      ? { copyCode: (code: string) => controls.codeSnippets!.put(code) }
-      : {}),
     ...(callbackAuth
       ? {
           signCallback: (action: string) =>
@@ -2992,7 +2991,9 @@ async function deliverRunReply(
       // The card is the reply. If it doesn't hold the whole answer — its
       // last update was rejected, or the answer outgrew it — post the
       // answer as ordinary messages so it is never lost.
-      if (!(await deliverIfCardBroken()) && cardTrimmed) {
+      if (await deliverIfCardBroken()) {
+        // Already posted outside the card.
+      } else if (cardTrimmed) {
         await deliverAnswerOutsideCard({
           channel,
           chatId,
@@ -3001,6 +3002,23 @@ async function deliverRunReply(
           reason: 'too-long',
           state: filterForPrefs(latestState),
         });
+      } else {
+        // Code on a card can't be copied: an answer holding some moves to a
+        // rich-text message below the card (see deliverCodeNatively). After a
+        // rescue the card holds a reduced render, so only the code follows.
+        const messageId = rescued ? undefined : cardMessageId;
+        const sent = await deliverCodeNatively({
+          channel,
+          chatId,
+          scope,
+          sendOpts,
+          locale,
+          state: filterForPrefs(latestState),
+          ...(messageId
+            ? { updateCard: (state: RunState) => channel.updateCard(messageId, renderCard(state, cardRenderOptions)) }
+            : {}),
+        });
+        if (sent !== 'none') run.answerIsNewMessage = true;
       }
     }
     run.runTerminal = latestState.terminal;

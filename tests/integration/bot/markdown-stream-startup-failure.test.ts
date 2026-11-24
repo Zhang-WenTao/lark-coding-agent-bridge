@@ -570,7 +570,8 @@ describe('markdown stream startup failures', () => {
     // The user is told the card is stuck while the run goes on…
     expect(sent.some((m) => m.includes('进度卡片更新不了了') && m.includes('230099'))).toBe(true);
     // …and the answer arrives as an ordinary message instead of being lost.
-    expect(lastMarkdown(h.channel)).toBe('ANSWER_SENTINEL');
+    // Posted as a rich-text message, whose code blocks copy whole.
+    expect(postTexts(h.channel)).toEqual(['ANSWER_SENTINEL']);
     // The frozen card is turned into a pointer at that message.
     const pointer = JSON.stringify(h.channel.updateCard.mock.calls.at(-1));
     expect(pointer).toContain('om_card_msg');
@@ -599,7 +600,11 @@ describe('markdown stream startup failures', () => {
     const finalCard = cards.at(-1) as object;
     expect(Buffer.byteLength(JSON.stringify(finalCard))).toBeLessThanOrEqual(24_000);
     expect(JSON.stringify(finalCard)).toContain('完整内容见下一条消息');
-    expect(lastMarkdown(h.channel)).toBe(long);
+    // Split across posts that each fit Feishu's 30 KB limit, together the whole answer.
+    const posts = postTexts(h.channel);
+    expect(posts.length).toBeGreaterThan(1);
+    expect(posts.join('')).toBe(long);
+    for (const m of h.channel.sent) expect(Buffer.byteLength(JSON.stringify(JSON.stringify(m.content)))).toBeLessThan(30_000);
     expect(h.channel.updateCard).not.toHaveBeenCalled();
   });
 
@@ -1179,6 +1184,14 @@ function reactionTypesAdded(channel: FakeLarkChannel): string[] {
       (call[0] as { data?: { reaction_type?: { emoji_type?: string } } })?.data?.reaction_type
         ?.emoji_type ?? '',
   );
+}
+
+/** The `md` text of every rich-text (post) message sent, in order. */
+function postTexts(channel: FakeLarkChannel): string[] {
+  return channel.sent
+    .map((m) => (m.content as { post?: { zh_cn: { content: Array<Array<{ text: string }>> } } }).post)
+    .filter((post) => post !== undefined)
+    .map((post) => post.zh_cn.content[0]![0]!.text);
 }
 
 function lastMarkdown(channel: FakeLarkChannel): string {

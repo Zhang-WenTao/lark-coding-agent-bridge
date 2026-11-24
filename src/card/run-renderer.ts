@@ -1,4 +1,3 @@
-import { copyLang, extractCodeBlocks } from './code-snippets';
 import { deepMaskEmails } from './mask-email';
 import { runStrings, type Locale, type RunStrings } from './i18n';
 import { pauseNotice } from './pause-notice';
@@ -48,16 +47,7 @@ export interface RunCardRenderOptions {
   activity?: RunActivity;
   /** Language of the bridge's own words on the card; Chinese when absent. */
   locale?: Locale;
-  /**
-   * Keep a code block for its copy button and return the key the button
-   * carries. When set, a finished card gets one 「复制代码」 button per fenced
-   * block in the answer (see {@link copyButtons}).
-   */
-  copyCode?: (code: string) => string;
 }
-
-/** Copy buttons past this many would crowd the card; later blocks get none. */
-export const MAX_COPY_BUTTONS = 6;
 
 /**
  * How long the run has been going and how long since the agent last did
@@ -116,7 +106,6 @@ export function renderCard(state: RunState, options: RunCardRenderOptions = {}):
     if (state.footer) elements.push(footerStatus(state.footer, t, options.activity));
     elements.push(stopButton(options, t));
   } else {
-    if (options.copyCode) elements.push(...copyButtons(state, options.copyCode, t));
     elements.push(...byline(state.sponsor && options.meta ? { ...options.meta, sponsor: state.sponsor } : options.meta));
   }
 
@@ -327,42 +316,6 @@ function stopButton(options: RunCardRenderOptions, t: RunStrings): object {
     },
     behaviors: [{ type: 'callback', value }],
   };
-}
-
-/**
- * Feishu cards can't write the clipboard, and their code blocks have no copy
- * icon, so each code block gets a button: a click makes the bridge send that
- * block alone as a rich-text code block, whose copy icon copies it whole. The
- * button carries only the snippet's key, plus the fence language when there
- * is a usable one.
- */
-function copyButtons(state: RunState, copyCode: (code: string) => string, t: RunStrings): object[] {
-  const text = state.blocks
-    .filter((b): b is Extract<Block, { kind: 'text' }> => b.kind === 'text')
-    .map((b) => b.content)
-    .join('\n');
-  const blocks = extractCodeBlocks(text).slice(0, MAX_COPY_BUTTONS);
-  if (blocks.length === 0) return [];
-  const columns = blocks.map((block, i) => ({
-    tag: 'column',
-    width: 'auto',
-    elements: [
-      {
-        tag: 'button',
-        text: { tag: 'plain_text', content: t.copyCode(blocks.length > 1 ? i + 1 : undefined, block.lang) },
-        type: 'default',
-        size: 'small',
-        behaviors: [{ type: 'callback', value: { cmd: copyCmd(copyCode(block.code), block.lang) } }],
-      },
-    ],
-  }));
-  return [{ tag: 'column_set', flex_mode: 'flow', horizontal_spacing: '8px', columns }];
-}
-
-/** `cmd` of a copy button: `copycode.<key>`, plus `.<lang>` when the language is usable. */
-function copyCmd(key: string, lang: string): string {
-  const safe = copyLang(lang);
-  return safe ? `copycode.${key}.${safe}` : `copycode.${key}`;
 }
 
 function footerStatus(

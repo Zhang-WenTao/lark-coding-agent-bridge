@@ -1,11 +1,12 @@
 import type { LarkChannel } from '@larksuite/channel';
 import { LarkChannelError } from '@larksuite/channel';
+import { answerPosts, codeOnlyPosts, hasCodeBlock, hasMarkdownTable } from '../card/answer-post';
 import { fullText } from '../card/card-budget';
 import { runStrings, type Locale } from '../card/i18n';
 import { runningToolLabel } from '../card/run-activity';
 import { renderCard } from '../card/run-renderer';
 import type { RunActivity, RunCardRenderOptions } from '../card/run-renderer';
-import type { RunState } from '../card/run-state';
+import { backgroundLeft, type Block, type RunState } from '../card/run-state';
 import { renderText } from '../card/text-renderer';
 import type { getMessageReplyMode } from '../config/schema';
 import { log } from '../core/logger';
@@ -79,11 +80,106 @@ export async function deliverAnswerOutsideCard(input: {
   log.info('outbound', 'answer-outside-card', { scope, reason, chars: text.length });
   if (!text) return;
   try {
-    // The SDK splits long markdown across several messages.
-    await channel.send(chatId, { markdown: text }, input.sendOpts);
+    // As posts, split to fit: their code blocks copy whole, emails are masked.
+    await sendPosts(channel, chatId, answerPosts(text), input.sendOpts);
   } catch (err) {
     log.fail('stream', err, { step: 'answer-outside-card', reason });
   }
+}
+
+/**
+ * Posts in order, each a reply to the one before it (the way the SDK threads
+ * the chunks of a long markdown message). Returns their message ids.
+ */
+async function sendPosts(
+  channel: LarkChannel,
+  chatId: string,
+  posts: object[],
+  sendOpts: { replyTo: string; replyInThread?: boolean },
+): Promise<string[]> {
+  const ids: string[] = [];
+  for (const post of posts) {
+    const result = await channel.send(chatId, { post }, { ...sendOpts, replyTo: ids.at(-1) ?? sendOpts.replyTo });
+    requireMessageReceipt(result, 'post');
+    ids.push(result.messageId);
+  }
+  return ids;
+}
+
+/** Index of the run's answer in `blocks`: the text blocks after the last tool call. */
+function answerStart(blocks: Block[]): number {
+  let i = blocks.length;
+  while (i > 0 && blocks[i - 1]!.kind === 'text') i--;
+  return i;
+}
+
+function answerFrom(blocks: Block[], start: number): string {
+  return blocks
+    .slice(start)
+    .map((b) => (b.kind === 'text' ? b.content.trim() : ''))
+    .filter(Boolean)
+    .join('\n\n');
+}
+
+/** The finished card with its answer replaced by a line pointing down at the message holding it. */
+export function answerMovedState(state: RunState, locale: Locale): RunState {
+  const start = answerStart(state.blocks);
+  return {
+    ...state,
+    blocks: [
+      ...state.blocks.slice(0, start),
+      { kind: 'text', content: runStrings(locale).answerBelow, streaming: false },
+    ],
+  };
+}
+
+/**
+ * Make the code in a finished answer copyable. A code block on a card has no
+ * copy icon (and a card can't write the clipboard); one in a rich-text (post)
+ * message does, and copies the block whole. So an answer holding code goes
+ * out as posts of its own, and the card keeps the process with a line
+ * pointing down at them. A post can't draw tables, so an answer with one
+ * stays on the card and only its code blocks follow as a post; so does every
+ * answer when there is no card to point from (`updateCard` absent).
+ *
+ * `state` is the finished run as the user sees it (`filterForPrefs`-projected).
+ * Nothing is sent for an answer without code, or a run that didn't finish
+ * cleanly. When sending fails the card keeps the answer.
+ */
+export async function deliverCodeNatively(input: {
+  channel: LarkChannel;
+  chatId: string;
+  scope: string;
+  sendOpts: { replyTo: string; replyInThread?: boolean };
+  state: RunState;
+  locale: Locale;
+  updateCard?: (state: RunState) => Promise<void>;
+}): Promise<'answer' | 'code' | 'none'> {
+  const { state, scope } = input;
+  if (state.terminal !== 'done') return 'none';
+  const answer = answerFrom(state.blocks, answerStart(state.blocks));
+  if (!hasCodeBlock(answer)) return 'none';
+  const as = input.updateCard && !hasMarkdownTable(answer) ? 'answer' : 'code';
+  try {
+    const ids = await sendPosts(
+      input.channel,
+      input.chatId,
+      as === 'answer' ? answerPosts(answer) : codeOnlyPosts(answer),
+      input.sendOpts,
+    );
+    log.info('outbound', 'answer-post', { scope, as, posts: ids.length, chars: answer.length, messageId: ids[0] });
+  } catch (err) {
+    log.fail('stream', err, { step: 'answer-post', as });
+    return 'none';
+  }
+  if (as === 'answer') {
+    try {
+      await input.updateCard!(answerMovedState(state, input.locale));
+    } catch (err) {
+      log.warn('stream', 'answer-pointer-failed', { scope, code: larkErrorCode(err) ?? null });
+    }
+  }
+  return as;
 }
 
 export { answerTextOf } from '../card/run-state';
@@ -278,6 +374,20 @@ export async function sendFinalReply(input: {
   }
 
   if (input.replyMode === 'card') {
+    // An answer with code goes out as posts instead, so its code blocks copy
+    // whole (see deliverCodeNatively) — unless the card has more to say than
+    // the answer, or the answer holds a table a post can't draw.
+    const answer = answerFrom(input.state.blocks, 0);
+    const code = input.state.terminal === 'done' && hasCodeBlock(answer);
+    if (code && !hasMarkdownTable(answer) && backgroundLeft(input.state) === 0) {
+      try {
+        const ids = await sendPosts(input.channel, input.chatId, answerPosts(answer), input.sendOpts);
+        log.info('outbound', 'sent', { ...outboundLogFields(input, 'post', body, { messageId: ids[0] }), posts: ids.length });
+        return;
+      } catch (err) {
+        log.fail('stream', err, { step: 'answer-post', as: 'answer' });
+      }
+    }
     const result = await input.channel.send(
       input.chatId,
       { card: renderCard(input.state, input.cardRenderOptions) },
@@ -285,6 +395,16 @@ export async function sendFinalReply(input: {
     );
     requireMessageReceipt(result, 'card');
     log.info('outbound', 'sent', outboundLogFields(input, 'card', body, result));
+    if (code) {
+      await deliverCodeNatively({
+        channel: input.channel,
+        chatId: input.chatId,
+        scope: input.scope,
+        sendOpts: input.sendOpts,
+        state: input.state,
+        locale: input.cardRenderOptions.locale ?? 'zh',
+      });
+    }
   } else if (input.replyMode === 'markdown') {
     if (body.trim()) {
       const result = await input.channel.send(

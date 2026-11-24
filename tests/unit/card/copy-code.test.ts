@@ -10,7 +10,7 @@ import {
   extractCodeBlocks,
   snippetKey,
 } from '../../../src/card/code-snippets.js';
-import { MAX_COPY_BUTTONS, renderCard } from '../../../src/card/run-renderer.js';
+import { renderCard } from '../../../src/card/run-renderer.js';
 import { initialState, reduce, type RunState } from '../../../src/card/run-state.js';
 
 function stateFrom(events: AgentEvent[]): RunState {
@@ -56,56 +56,13 @@ describe('extractCodeBlocks', () => {
   });
 });
 
-describe('copy buttons on the run card', () => {
-  const done = stateFrom([
-    { type: 'text', delta: ANSWER },
-    { type: 'done', terminationReason: 'normal' },
-  ]);
-
-  it('adds one button per code block on a finished card, carrying only the key', () => {
-    const kept: string[] = [];
-    const card = renderCard(done, { copyCode: (code) => (kept.push(code), snippetKey(code)) });
-    expect(kept).toEqual([SQL, 'ls -la']);
-    expect(buttons(card)).toEqual([
-      ['📋 复制 #1 SQL', { cmd: `copycode.${snippetKey(SQL)}.sql` }],
-      ['📋 复制 #2 BASH', { cmd: `copycode.${snippetKey('ls -la')}.bash` }],
-    ]);
-  });
-
-  it('leaves the language off the button when it would not survive the cmd split', () => {
-    const odd = stateFrom([
-      { type: 'text', delta: '```file.ts\nx()\n```' },
+describe('the finished run card', () => {
+  it('carries no copy buttons: an answer with code moves to a post instead (see deliverCodeNatively)', () => {
+    const done = stateFrom([
+      { type: 'text', delta: ANSWER },
       { type: 'done', terminationReason: 'normal' },
     ]);
-    expect(buttons(renderCard(odd, { copyCode: snippetKey }))[0]![1]).toEqual({ cmd: `copycode.${snippetKey('x()')}` });
-  });
-
-  it('labels a lone block without a number', () => {
-    const one = stateFrom([
-      { type: 'text', delta: '```\nmake\n```' },
-      { type: 'done', terminationReason: 'normal' },
-    ]);
-    expect(buttons(renderCard(one, { copyCode: snippetKey }))[0]![0]).toBe('📋 复制代码');
-  });
-
-  it('adds none while running, without a store, or when there is no code', () => {
-    const running = stateFrom([{ type: 'text', delta: ANSWER }]);
-    expect(buttons(renderCard(running, { copyCode: snippetKey })).map(([label]) => label)).toEqual(['⏹ 终止']);
     expect(buttons(renderCard(done))).toEqual([]);
-    const plain = stateFrom([
-      { type: 'text', delta: 'no code here' },
-      { type: 'done', terminationReason: 'normal' },
-    ]);
-    expect(buttons(renderCard(plain, { copyCode: snippetKey }))).toEqual([]);
-  });
-
-  it(`stops at ${MAX_COPY_BUTTONS} buttons`, () => {
-    const many = Array.from({ length: MAX_COPY_BUTTONS + 2 }, (_, i) => `\`\`\`\ncmd ${i}\n\`\`\``).join('\n\n');
-    const state = stateFrom([
-      { type: 'text', delta: many },
-      { type: 'done', terminationReason: 'normal' },
-    ]);
-    expect(buttons(renderCard(state, { copyCode: snippetKey }))).toHaveLength(MAX_COPY_BUTTONS);
   });
 });
 

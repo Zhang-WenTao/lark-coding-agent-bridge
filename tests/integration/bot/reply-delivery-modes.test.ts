@@ -141,7 +141,38 @@ describe('reply delivery by mode', () => {
   });
 });
 
-async function startHarness(mode: Mode, where: Where): Promise<{
+describe('an answer holding code, in card mode', () => {
+  it('moves to a post below the card, which keeps a pointer to it', async () => {
+    const h = await startHarness('card', 'p2p', [
+      { type: 'system', sessionId: 'sess-1' },
+      { type: 'text', delta: `${ANSWER}\n\n\`\`\`sql\nSELECT 1;\n\`\`\`` },
+      { type: 'done', terminationReason: 'normal' },
+    ]);
+
+    await h.channel.handlers.message?.(p2pMessage('om_q'));
+    await waitFor(() => h.channel.reactions.some((r) => r.emoji === 'DONE'));
+    await waitFor(() => h.channel.updateCard.mock.calls.length > 0);
+
+    // The card streamed the answer first, as always.
+    expect(h.channel.streams).toHaveLength(1);
+    expect(h.channel.streams[0]!.renders.at(-1)).toContain('SELECT 1;');
+    // Then the answer went out as one post replying to the question…
+    expect(h.channel.sent).toHaveLength(1);
+    const post = h.channel.sent[0]!;
+    expect(Object.keys(post.content as object)).toEqual(['post']);
+    expect(post.options).toEqual({ replyTo: 'om_q' });
+    expect(JSON.stringify(post.content)).toContain('```sql\\nSELECT 1;\\n```');
+    // …and the card now points at it instead of holding it.
+    expect(h.channel.updateCard).toHaveBeenCalledTimes(1);
+    const [messageId, card] = h.channel.updateCard.mock.calls[0]!;
+    expect(messageId).toBe('om_stream_1');
+    expect(JSON.stringify(card)).toContain('答复见下一条消息');
+    expect(JSON.stringify(card)).not.toContain('SELECT 1;');
+    expect(JSON.stringify(card)).not.toContain(ANSWER);
+  });
+});
+
+async function startHarness(mode: Mode, where: Where, events: AgentEvent[] = RUN_EVENTS): Promise<{
   channel: FakeLarkChannel;
   agent: FakeAgentAdapter;
   sessions: SessionStore;
@@ -162,7 +193,7 @@ async function startHarness(mode: Mode, where: Where): Promise<{
   const profileConfig = { ...base, workspaces: { ...base.workspaces, default: workspace } };
   const sessions = new SessionStore(join(tmp.profile, 'sessions.json'));
   const workspaces = new WorkspaceStore(join(tmp.profile, 'workspaces.json'));
-  const agent = new FakeAgentAdapter({ events: RUN_EVENTS });
+  const agent = new FakeAgentAdapter({ events });
   const channel = createFakeLarkChannel(where);
   sdkMock.channel = channel;
 
