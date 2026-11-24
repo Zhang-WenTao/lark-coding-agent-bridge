@@ -92,10 +92,27 @@ export type CardHeaderTemplate = (typeof CARD_HEADER_TEMPLATES)[number];
 
 /** `messageReply: 'final-card'` appearance. Config-file only. */
 export interface FinalCardPreference {
-  /** Header bar colour, used only when the answer gets a header. Default `violet`. */
+  /**
+   * Header bar colour, used only when the answer gets a header. Feishu takes
+   * only these presets here — no custom colour for the bar or its title.
+   * Default `violet`.
+   */
   headerTemplate?: CardHeaderTemplate;
+  /**
+   * Image key (`img_v3_…`) shown as the header icon, e.g. the bot's avatar.
+   * Upload it with the bot's own app (`im/v1/images`, image_type `message`).
+   * Default: no icon.
+   */
+  headerIcon?: string;
   /** A grey line under the answer naming the model. Default off. */
   footer?: boolean;
+}
+
+/** {@link FinalCardPreference} with defaults applied. */
+export interface ResolvedFinalCard {
+  headerTemplate: CardHeaderTemplate;
+  headerIcon?: string;
+  footer: boolean;
 }
 export type CotMessagesMode = 'off' | 'brief' | 'detailed';
 /**
@@ -756,11 +773,13 @@ export function getMessageReplyMode(cfg: AppConfig): MessageReplyMode {
 }
 
 /** `finalCard` with defaults applied; an unknown header colour falls back to violet. */
-export function getFinalCardPreference(cfg: AppConfig): Required<FinalCardPreference> {
+export function getFinalCardPreference(cfg: AppConfig): ResolvedFinalCard {
   const raw = cfg.preferences?.finalCard;
   const template = raw?.headerTemplate;
+  const icon = typeof raw?.headerIcon === 'string' ? raw.headerIcon.trim() : '';
   return {
     headerTemplate: template && CARD_HEADER_TEMPLATES.includes(template) ? template : 'violet',
+    ...(icon ? { headerIcon: icon } : {}),
     footer: raw?.footer === true,
   };
 }
