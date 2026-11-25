@@ -5,6 +5,7 @@ import {
   supplementPreview,
   supplementRole,
   supplementSignal,
+  topicFollowupFolds,
 } from '../../../src/bot/supplement';
 import { initialState, reduce } from '../../../src/card/run-state';
 
@@ -47,10 +48,26 @@ describe('supplementSignal', () => {
     expect(supplementSignal('/补充 换成 EUR', undefined, target(), true)).toBe('prefix');
   });
 
+  it('queues a plain topic follow-up when the topic does not fold (topicFollowup: queue)', () => {
+    expect(supplementSignal('是主机全局记忆', undefined, target(), false)).toBeUndefined();
+    expect(supplementSignal('看下这条', 'om_unrelated', target(), false)).toBeUndefined();
+    // Explicit signals still fold in.
+    expect(supplementSignal('这个也看下', 'om_card', target(), false)).toBe('quote');
+    expect(supplementSignal('补充：换成 EUR', undefined, target(), false)).toBe('prefix');
+  });
+
   it('queues everything else as a new question', () => {
     expect(supplementSignal('新问题：1+1 等于几', undefined, target())).toBeUndefined();
     expect(supplementSignal('帮我补充一下文档', undefined, target())).toBeUndefined();
     expect(supplementSignal('看下这条', 'om_unrelated', target())).toBeUndefined();
+  });
+});
+
+describe('topicFollowupFolds', () => {
+  it('folds by default and with supplement, queues only with queue', () => {
+    expect(topicFollowupFolds(undefined)).toBe(true);
+    expect(topicFollowupFolds('supplement')).toBe(true);
+    expect(topicFollowupFolds('queue')).toBe(false);
   });
 });
 
