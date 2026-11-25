@@ -1,3 +1,4 @@
+import type { TopicFollowup } from '../config/schema';
 import type { SupplementTarget } from '../runtime/active-runs';
 import { mediaPlaceholders } from './media-placeholders';
 
@@ -19,16 +20,18 @@ export type SupplementSignal = 'quote' | 'prefix' | 'topic';
  * mixes a new question into someone's running task, while guessing wrong the
  * other way merely queues it for the next run — so no signal means queue.
  *
- * A topic (thread) is itself an explicit signal: it is opened for one task,
- * its messages hang off the topic root rather than quoting the run, and the
- * run is scoped to that topic — so a follow-up posted in the same topic while
- * the run is going is folded in without needing a quote or prefix.
+ * A topic (thread) is by default an explicit signal too: it is opened for one
+ * task, its messages hang off the topic root rather than quoting the run, and
+ * the run is scoped to that topic — so a follow-up posted in the same topic
+ * while the run is going is folded in without needing a quote or prefix.
+ * `topicFolds` is false where `preferences.topicFollowup` is `'queue'` (see
+ * {@link topicFollowupFolds}): there a plain message waits for the next run.
  */
 export function supplementSignal(
   content: string,
   quotedMessageId: string | undefined,
   target: SupplementTarget,
-  inTopic = false,
+  topicFolds = false,
 ): SupplementSignal | undefined {
   if (
     quotedMessageId &&
@@ -37,8 +40,18 @@ export function supplementSignal(
     return 'quote';
   }
   if (SUPPLEMENT_PREFIX_RE.test(content)) return 'prefix';
-  if (inTopic) return 'topic';
+  if (topicFolds) return 'topic';
   return undefined;
+}
+
+/**
+ * Whether being in a topic is itself the supplement signal. A long run — a
+ * monitor sampling for an hour — holds its topic, and a question folded into
+ * it is only read when the run's current tool call returns, so topics where
+ * people keep asking while such runs go on set `topicFollowup: 'queue'`.
+ */
+export function topicFollowupFolds(pref: TopicFollowup | undefined): boolean {
+  return pref !== 'queue';
 }
 
 /**

@@ -13,6 +13,9 @@ export type TenantBrand = 'feishu' | 'lark';
  *   - `file`: value is at the path `id` (or `provider.path` if provider config)
  *   - `exec`: spawn `provider.command`, send JSON over stdin, read JSON from stdout
  */
+/** `preferences.topicFollowup`: fold a plain follow-up in a topic into its running run, or queue it. */
+export type TopicFollowup = 'supplement' | 'queue';
+
 export interface AutoTopicPreference {
   /** Only these chats; empty or absent means every chat. */
   chats?: string[];
@@ -239,6 +242,15 @@ export interface AppPreferences {
    * bots' messages stay put. Config-file only. Default off.
    */
   autoTopic?: boolean | AutoTopicPreference;
+  /**
+   * 话题里的跟进消息: while a run is going on in a topic, what a message posted
+   * in that topic without a quote-reply or 补充/追加/+ prefix does.
+   * `'supplement'` (default) folds it into the run; `'queue'` queues it for
+   * the next run, which answers it on its own — for topics where people keep
+   * asking while a long run (a monitor, a build) holds the topic. Quote-replies
+   * and prefixed messages fold in either way. Config-file only.
+   */
+  topicFollowup?: TopicFollowup;
   /**
    * Whether to send a separate Lark COT process message before the final
    * answer. `brief` mirrors the lightweight tool/progress visibility from

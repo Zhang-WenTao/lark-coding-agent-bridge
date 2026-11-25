@@ -1,7 +1,7 @@
 import type { LarkChannel } from '@larksuite/channel';
 import { log } from '../core/logger';
 
-type ReactionType = 'Typing' | 'DONE' | 'Get';
+type ReactionType = 'Typing' | 'DONE' | 'Get' | 'OneSecond';
 
 async function addReaction(
   channel: LarkChannel,
@@ -65,6 +65,49 @@ export function addSupplementReaction(
   messageId: string,
 ): Promise<string | undefined> {
   return addReaction(channel, messageId, 'Get');
+}
+
+/**
+ * Add a "OneSecond" (稍等) reaction to a message that arrived while a run was
+ * going on in its scope and was queued for the next run rather than folded in
+ * — without it the sender sees nothing until that run ends.
+ */
+export function addQueuedReaction(
+  channel: LarkChannel,
+  messageId: string,
+): Promise<string | undefined> {
+  return addReaction(channel, messageId, 'OneSecond');
+}
+
+/**
+ * The 稍等 reactions still on queued messages, so they come off when the batch
+ * starts running (its own Typing / DONE take over from there).
+ */
+export class QueuedReactions {
+  private readonly ids = new Map<string, Promise<string | undefined>>();
+
+  constructor(private readonly channel: LarkChannel) {}
+
+  mark(messageId: string): void {
+    if (this.ids.has(messageId)) return;
+    this.ids.set(messageId, addQueuedReaction(this.channel, messageId));
+  }
+
+  async release(messageIds: Iterable<string>): Promise<void> {
+    const taken: [string, Promise<string | undefined>][] = [];
+    for (const messageId of messageIds) {
+      const id = this.ids.get(messageId);
+      if (!id) continue;
+      this.ids.delete(messageId);
+      taken.push([messageId, id]);
+    }
+    await Promise.all(
+      taken.map(async ([messageId, id]) => {
+        const reactionId = await id;
+        if (reactionId) await removeReaction(this.channel, messageId, reactionId);
+      }),
+    );
+  }
 }
 
 /** Remove a previously-added reaction. Tolerates errors silently — best
