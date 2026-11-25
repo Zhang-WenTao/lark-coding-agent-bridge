@@ -206,6 +206,7 @@ import {
   addDoneReaction,
   addSupplementReaction,
   addWorkingReaction,
+  QueuedReactions,
 } from './reaction';
 import {
   otherSupplementInstruction,
@@ -213,6 +214,7 @@ import {
   supplementPreview,
   supplementRole,
   supplementSignal,
+  topicFollowupFolds,
 } from './supplement';
 import { applyRecall, RecalledMessages, settleEarlyRecalls } from './recall';
 import { registerChannelEvents } from './channel-events';
@@ -627,7 +629,10 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
     scratchDir: join(deps.appPaths?.profileDir ?? tmpdir(), 'quota-scratch'),
     ...(deps.appPaths?.profileDir ? { profileDir: deps.appPaths.profileDir } : {}),
   });
+  // 稍等 on messages queued behind a running run; off again once they run.
+  const queuedReactions = new QueuedReactions(channel);
   const pending = new PendingQueue(DEBOUNCE_MS, (scope, queued) => {
+    void queuedReactions.release(queued.map((m) => m.messageId));
     // A recall can land after intake but before the queue had the message.
     const batch = queued.filter((m) => !recalled.has(m.messageId));
     if (batch.length < queued.length) {
@@ -767,6 +772,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
     pool,
     autoResumer,
     recalled,
+    queuedReactions,
   };
   registerChannelEvents(channel, {
     message: (msg) => intakeMessage({ ...intakeDeps, msg }),
@@ -1229,6 +1235,7 @@ interface IntakeDeps {
   pool: ProcessPool;
   autoResumer?: AutoResumer;
   recalled?: RecalledMessages;
+  queuedReactions?: QueuedReactions;
 }
 
 type LogThreadModeOverride = (input: {
@@ -1476,7 +1483,15 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     return;
   }
   const size = pending.push(runScope, runMsg);
-  log.info('intake', 'queued', { scope: runScope, queueSize: size, debounceMs: DEBOUNCE_MS });
+  // Behind a run going on right here: say it was received, it is not lost.
+  const behindRun = Boolean(activeRuns.get(runScope));
+  if (behindRun) deps.queuedReactions?.mark(runMsg.messageId);
+  log.info('intake', 'queued', {
+    scope: runScope,
+    queueSize: size,
+    debounceMs: DEBOUNCE_MS,
+    ...(behindRun ? { behindRun } : {}),
+  });
 }
 
 /**
@@ -1700,7 +1715,8 @@ async function intakeEdit(
 /**
  * Fold a follow-up into the run already going on this scope instead of
  * queueing it as a new question — only on an explicit signal (quote-reply to
- * the run, a 补充/追加/+ prefix, or posting in the same topic) and only from
+ * the run, a 补充/追加/+ prefix, or posting in the same topic unless
+ * `preferences.topicFollowup` is `'queue'`) and only from
  * any human — the initiator and the owner add with the run's identity, anyone
  * else's supplement is marked as theirs and may not borrow it (see
  * supplementRole). Bots, and a run that can no longer take input, keep the
@@ -1726,7 +1742,7 @@ async function tryInjectSupplement(deps: {
     msg.content,
     replyQuoteTargetForMessage(msg, mode),
     target,
-    inTopic,
+    inTopic && topicFollowupFolds(controls.profileConfig.preferences.topicFollowup),
   );
   if (!signal) return false;
   const role = supplementRole(
