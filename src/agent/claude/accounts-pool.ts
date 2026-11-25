@@ -10,6 +10,8 @@ import { defaultAccountsConfig, readAccountsConfig } from './accounts-config';
 import { type AccountQuotaState, type ClaudeAccountEntry, type ClaudeAccountsConfig, type ClaudeAccountsPaths, DEFAULT_ACCOUNT_ID, GRACE_LINE, type LineCap, type PickedAccount, type SwitchLines, UNKNOWN_RESET_MS, WINDOW_KINDS, WINDOW_LABELS, type WindowKind, accountSecretId, claudeAccountsPaths, graceMs, isPausedEntry } from './accounts-model';
 import { switchToAccount, withMain } from './accounts-config';
 import { type AccountWindowView, STICKY_MARGIN, switchScore, windowsKnown, withCap } from './accounts-score';
+import { AccountScheduler } from './accounts-scheduling';
+import { type TaskSize, isBigSize } from './task-size';
 
 export interface ClaudeAccountPoolOptions {
   paths: ClaudeAccountsPaths;
@@ -32,12 +34,25 @@ export class ClaudeAccountPool {
   private readonly readSecret: (id: string) => Promise<string | undefined>;
   private readonly holidaysDir: string;
   private readonly offDay: (now: number) => boolean;
+  /** 账户调度: run sizes, reservations and room to the lines (see `accounts-scheduling.ts`). */
+  readonly scheduler: AccountScheduler;
 
   constructor(private readonly opts: ClaudeAccountPoolOptions) {
     this.now = opts.now ?? Date.now;
     this.readSecret = opts.readSecret ?? ((id) => getSecret(id, opts.paths.keystore));
     this.holidaysDir = join(dirname(opts.paths.configFile), 'holidays');
     this.offDay = opts.isOffDay ?? ((now) => isOffDay(now, this.holidaysDir));
+    this.scheduler = new AccountScheduler({
+      stateFile: opts.paths.schedulingFile ?? join(dirname(opts.paths.stateFile), 'account-scheduling-state.json'),
+      now: this.now,
+      config: () => this.config.scheduling,
+      pool: {
+        accounts: () => this.accounts(),
+        windowViews: (id, now, cap) => this.windowViews(id, now, cap),
+        readyAt: (id, now, cap) => this.underLinesAt(id, now, cap) <= now,
+        score: (id, now, cap) => this.score(id, now, cap),
+      },
+    });
   }
 
   /** Re-read the account list when its file changed and decrypt the tokens. Never throws. */
@@ -215,6 +230,63 @@ export class ClaudeAccountPool {
   pickReady(exclude?: ReadonlySet<string>, cap?: LineCap): PickedAccount | undefined {
     const now = this.now();
     return this.choose(exclude, (id) => this.underLinesAt(id, now, cap) <= now, now, cap);
+  }
+
+  /**
+   * The account a run of `size` should use (账户调度). `off` is the pool's own
+   * rounds (`round`: {@link pickReady}, {@link pickRunnable} or {@link pick});
+   * `shadow` also logs what `on` would pick; `on` gives a big run the account
+   * with the most room to its lines (reservations counted) and a small one the
+   * best switch score among accounts its reserve fits; a conversation stays on
+   * its last account while that one fits. With nowhere ready it falls back to
+   * the rounds. `borrow`: the run takes the account without making it the main
+   * one (a big run, or a conversation kept on a side account).
+   */
+  pickFor(
+    size: TaskSize,
+    opts: {
+      reserveUsd?: number;
+      exclude?: ReadonlySet<string>;
+      cap?: LineCap;
+      runId?: string;
+      sessionId?: string;
+      round?: 'ready' | 'runnable' | 'any';
+    } = {},
+  ): { account: PickedAccount | undefined; borrow: boolean } {
+    const mode = this.scheduler.mode;
+    const legacy = (): PickedAccount | undefined =>
+      opts.round === 'ready'
+        ? this.pickReady(opts.exclude, opts.cap)
+        : opts.round === 'runnable'
+          ? this.pickRunnable(opts.exclude, opts.cap)
+          : this.pick(opts.exclude, opts.cap);
+    if (mode === 'off' || !this.multi) return { account: legacy(), borrow: false };
+    const now = this.now();
+    const reserveUsd = opts.reserveUsd ?? this.scheduler.reserveOf(size);
+    const sessionAccount = this.scheduler.sessionAccount(opts.sessionId);
+    const choice = this.scheduler.choose(size, reserveUsd, {
+      ...(opts.exclude ? { exclude: opts.exclude } : {}),
+      ...(opts.cap ? { cap: opts.cap } : {}),
+      ...(opts.runId ? { runId: opts.runId } : {}),
+      ...(sessionAccount ? { sessionAccount } : {}),
+    });
+    let chosen: PickedAccount | undefined;
+    if (choice?.account) chosen = this.accounts().find((a) => a.id === choice.account);
+    else if (choice?.allowed) chosen = this.choose(opts.exclude, (id) => choice.allowed!.has(id), now, opts.cap);
+    const fallback = legacy();
+    const main = this.accounts()[0]?.id;
+    const borrow = chosen !== undefined && chosen.id !== main && (isBigSize(size) || choice?.why === 'session');
+    log.info('claude-accounts', mode === 'on' ? 'sched-pick' : 'shadow-pick', {
+      runId: opts.runId ?? null,
+      size,
+      reserveUsd: Math.round(reserveUsd * 100) / 100,
+      why: choice?.why ?? 'none-ready',
+      pick: chosen?.id ?? null,
+      legacy: fallback?.id ?? null,
+      rooms: choice?.rooms ?? {},
+    });
+    if (mode === 'shadow') return { account: fallback, borrow: false };
+    return chosen ? { account: chosen, borrow } : { account: fallback, borrow: false };
   }
 
   /**
@@ -398,8 +470,9 @@ export class ClaudeAccountPool {
     return window.resetsAt !== undefined && window.resetsAt <= now ? 0 : window.usedPercent;
   }
 
-  /** Record what a run on `id` reported about its quota. */
-  observe(id: string, evt: RateLimitEvent): void {
+  /** Record what a run on `id` reported about its quota; `runId` lets the scheduler follow that run's steps. */
+  observe(id: string, evt: RateLimitEvent, runId?: string): void {
+    if (evt.windows?.length) this.scheduler.noteQuota(id, evt.windows, runId);
     const now = this.now();
     const all = this.loadState();
     const state: AccountQuotaState = all[id] ?? { windows: {}, updatedAt: now };
@@ -450,7 +523,7 @@ export class ClaudeAccountPool {
 
   /** Wait for pending state writes (tests, shutdown). */
   async flush(): Promise<void> {
-    await this.writing;
+    await Promise.all([this.writing, this.scheduler.flush()]);
   }
 
   private toPicked(entry: ClaudeAccountEntry): PickedAccount {

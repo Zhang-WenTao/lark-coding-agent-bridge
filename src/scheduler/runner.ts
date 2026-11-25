@@ -107,6 +107,8 @@ export async function runScheduledJob(
     workspaces: deps.workspaces,
     executor: deps.executor,
     now: Date.now(),
+    // 任务体量: the job's past runs size the next one.
+    sizeKey: `job:${job.id}`,
     observability: {
       profile: deps.controls.profile,
       agent: capability.agentId,

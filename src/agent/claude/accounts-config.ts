@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { removeSecret, setSecret } from '../../config/keystore';
 import { writeFileAtomic } from '../../platform/atomic-write';
 import { withFileLock } from '../../platform/file-lock';
+import { parseSchedulingConfig } from './accounts-scheduling';
 import { type ClaudeAccountEntry, type ClaudeAccountsConfig, type ClaudeAccountsPaths, DEFAULT_ACCOUNT_ID, DEFAULT_LINES, type LineBoost, NICKNAME_MOODS, type NicknameMood, type Nicknames, type SwitchLines, WINDOW_KINDS, type WindowKind, accountSecretId, isPausedEntry, isValidAccountId, isValidLine, parseNicknames } from './accounts-model';
 
 export function defaultAccountsConfig(): ClaudeAccountsConfig {
@@ -14,7 +15,14 @@ export function defaultAccountsConfig(): ClaudeAccountsConfig {
  */
 export function parseAccountsConfig(text: string): ClaudeAccountsConfig {
   const config = defaultAccountsConfig();
-  let raw: { lines?: unknown; offDayLines?: unknown; offDayGraceHours?: unknown; accounts?: unknown; stagger?: unknown };
+  let raw: {
+    lines?: unknown;
+    offDayLines?: unknown;
+    offDayGraceHours?: unknown;
+    accounts?: unknown;
+    stagger?: unknown;
+    scheduling?: unknown;
+  };
   try {
     raw = JSON.parse(text) as typeof raw;
   } catch {
@@ -27,6 +35,8 @@ export function parseAccountsConfig(text: string): ClaudeAccountsConfig {
   const offDayGrace = parseGraceHours(raw.offDayGraceHours);
   if (offDayGrace) config.offDayGraceHours = offDayGrace;
   if (raw.stagger === false) config.stagger = false;
+  const scheduling = parseSchedulingConfig(raw.scheduling);
+  if (scheduling) config.scheduling = scheduling;
   const accounts: ClaudeAccountEntry[] = [];
   const seen = new Set<string>();
   for (const item of Array.isArray(raw.accounts) ? raw.accounts : []) {

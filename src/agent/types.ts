@@ -1,6 +1,7 @@
 import type { AgentAvailability } from './preflight';
 import type { ClaudePermissionMode, CodexSandboxMode } from '../config/permissions';
 import type { RunGuard } from '../policy/owner-guard';
+import type { SizeHint } from './claude/task-size';
 
 export type { ClaudePermissionMode } from '../config/permissions';
 
@@ -167,6 +168,13 @@ export interface AgentRunOptions {
    * ceiling. Adapters with a single account ignore it.
    */
   accountLineCap?: Partial<Record<'five_hour' | 'seven_day', number>>;
+  /**
+   * 任务体量: the size the run starts on (rating, command, effort), for the
+   * account pick and the run's reservation; see `claude/task-size.ts`.
+   */
+  sizeHint?: SizeHint;
+  /** Runs of the same scheduled job share it: their past cost sizes the next one. */
+  sizeKey?: string;
 }
 
 export interface AgentRun {

@@ -5,6 +5,7 @@ import { mergeProcessEnv, spawnProcess } from '../platform/spawn';
 import { trackAgentChild } from '../platform/child-ledger';
 import type { AgentKind } from '../config/profile-schema';
 import { FABLE_WINDOW } from './claude/accounts';
+import type { RatingScale } from './claude/task-size';
 import { EFFORT_LEVELS, type AutoEffortPreference, type EffortLevel } from '../config/schema';
 
 /**
@@ -222,7 +223,9 @@ export function classifierSystemPrompt(ladder: readonly AutoEffortRung[]): strin
     levels,
     '规则：只看完成任务本身的难度，不看消息长短；对上一轮的简单跟进（继续、好的、照做）沿用当前档位；',
     '上一轮失败、超时，或用户说结果不对、还是不行时，倾向高一档。',
-    `只输出一个 JSON，不要其他文字：{"level":"${rated.map((r) => r.label).join('|')}","reason":"不超过 20 字"}`,
+    '另外估一下工作量（和档位无关）：subagents 是需要拆给并行子 agent 的数量（多仓库、多区、多模块并行排查或批量扫描才拆，普通任务填 0）；',
+    'background 表示是否要跑构建、全量测试或长时间后台等待；long 表示是否预计超过 30 分钟或需要建任务台账。',
+    `只输出一个 JSON，不要其他文字：{"level":"${rated.map((r) => r.label).join('|')}","reason":"不超过 20 字","subagents":0,"background":false,"long":false}`,
   ].join('\n');
 }
 
@@ -258,11 +261,11 @@ export function classifierUserPrompt(input: ClassifierInput): string {
   return lines.join('\n\n');
 }
 
-/** `{"level":"high",…}` somewhere in the answer → the rung index and reason. */
+/** `{"level":"high",…}` somewhere in the answer → the rung index, reason and the work's scale. */
 export function parseClassifierAnswer(
   ladder: readonly AutoEffortRung[],
   answer: string,
-): { rung: number; reason?: string } | undefined {
+): ClassifierAnswer | undefined {
   const m = /\{[^{}]*\}/.exec(answer);
   if (!m) return undefined;
   let doc: unknown;
@@ -276,7 +279,28 @@ export function parseClassifierAnswer(
   const rung = ladder.findIndex((r) => !r.manual && r.label.toLowerCase() === level.trim().toLowerCase());
   if (rung < 0) return undefined;
   const reason = (doc as { reason?: unknown }).reason;
-  return { rung, ...(typeof reason === 'string' && reason ? { reason: reason.slice(0, 60) } : {}) };
+  const scale = parseScale(doc as Record<string, unknown>);
+  return {
+    rung,
+    ...(typeof reason === 'string' && reason ? { reason: reason.slice(0, 60) } : {}),
+    ...(scale ? { scale } : {}),
+  };
+}
+
+/** The rating's answer: the rung, why, and what it said about the work (任务体量). */
+export interface ClassifierAnswer {
+  rung: number;
+  reason?: string;
+  scale?: RatingScale;
+}
+
+function parseScale(doc: Record<string, unknown>): RatingScale | undefined {
+  const scale: RatingScale = {};
+  const n = doc.subagents;
+  if (typeof n === 'number' && Number.isFinite(n)) scale.subagents = Math.max(0, Math.min(9, Math.round(n)));
+  if (typeof doc.background === 'boolean') scale.background = doc.background;
+  if (typeof doc.long === 'boolean') scale.long = doc.long;
+  return Object.keys(scale).length > 0 ? scale : undefined;
 }
 
 export interface ClassifyOptions {
@@ -295,7 +319,7 @@ export async function classify(
   settings: AutoEffortSettings,
   input: ClassifierInput,
   opts: ClassifyOptions,
-): Promise<{ rung: number; reason?: string } | undefined> {
+): Promise<ClassifierAnswer | undefined> {
   await mkdir(opts.cwd, { recursive: true }).catch(() => undefined);
   const args = [
     '-p',

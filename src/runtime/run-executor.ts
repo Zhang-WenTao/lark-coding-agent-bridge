@@ -74,6 +74,10 @@ export interface SubmitRunInput {
   subagentModel?: string;
   /** See AgentRunOptions.accountLineCap. */
   accountLineCap?: AgentRunOptions['accountLineCap'];
+  /** See AgentRunOptions.sizeHint. */
+  sizeHint?: AgentRunOptions['sizeHint'];
+  /** See AgentRunOptions.sizeKey. */
+  sizeKey?: string;
   nowait?: boolean;
   /** Who this run is for — the person its usage is booked against. */
   actor?: { id: string; name?: string };
@@ -209,6 +213,8 @@ export class RunExecutor {
       ...(input.runContextFile ? { runContextFile: input.runContextFile } : {}),
       ...(input.subagentModel ? { subagentModel: input.subagentModel } : {}),
       ...(input.accountLineCap ? { accountLineCap: input.accountLineCap } : {}),
+      ...(input.sizeHint ? { sizeHint: input.sizeHint } : {}),
+      ...(input.sizeKey ? { sizeKey: input.sizeKey } : {}),
     };
     const compatKey = runCompatKey({ ...runOptions, gated: Boolean(input.gate) });
     const dimensions = {

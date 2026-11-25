@@ -6,9 +6,11 @@ import {
   isShortFollowUp,
   type AutoEffortSettings,
   type AutoEffortStore,
+  type ClassifierAnswer,
   type ClassifierInput,
   type RungDecision,
 } from '../agent/auto-effort';
+import { type RatingScale, type SizeHint, type TaskSize, preRunSize } from '../agent/claude/task-size';
 import type { EffortLevel } from '../config/schema';
 import { log } from '../core/logger';
 
@@ -21,6 +23,8 @@ export interface AutoEffortPick {
   /** The rung the conversation was on before; undefined on a new one. */
   from?: string;
   reason?: string;
+  /** 任务体量: the size the run starts on, for the account pick. */
+  size?: SizeHint;
 }
 
 export interface AutoEffortPlan {
@@ -47,6 +51,8 @@ export interface StartAutoEffortInput {
   classify: { cwd: string; env: () => Record<string, string>; binary?: string };
   /** How full a quota window is on the account the run would get; undefined when unknown (the rung stays usable). */
   windowUsed?: (kind: string) => number | undefined;
+  /** Command prefixes that start big work, over the built-in ones (`scheduling.bigCommands`). */
+  bigCommands?: () => Readonly<Record<string, TaskSize>> | undefined;
   now?: () => number;
 }
 
@@ -75,7 +81,7 @@ export function startAutoEffort(input: StartAutoEffortInput): AutoEffortPlan {
   const short = isShortFollowUp(text, input.attachments);
   const known = store.get(scope);
   const startedAt = now();
-  const rating: Promise<{ rung: number; reason?: string } | undefined> =
+  const rating: Promise<ClassifierAnswer | undefined> =
     forced === undefined && !short
       ? classify(
           settings,
@@ -120,6 +126,7 @@ export function startAutoEffort(input: StartAutoEffortInput): AutoEffortPlan {
         if (allowed.length === 0) return undefined;
         let decision: RungDecision;
         let reason: string | undefined;
+        let scale: RatingScale | undefined;
         if (liveProcess && current) {
           // The message goes to the process this scope still runs: it keeps its model and effort.
           decision = { rung: current.rung, downVotes: current.downVotes, via: 'stay' };
@@ -131,6 +138,7 @@ export function startAutoEffort(input: StartAutoEffortInput): AutoEffortPlan {
         } else {
           const rated = await rating;
           reason = rated?.reason;
+          scale = rated?.scale;
           decision = decideRung({
             ladder,
             allowed,
@@ -161,6 +169,15 @@ export function startAutoEffort(input: StartAutoEffortInput): AutoEffortPlan {
           short,
           waitedMs: now() - startedAt,
         });
+        const size = preRunSize({
+          ...(scale ? { scale } : {}),
+          effort: rung.effort,
+          text,
+          ...(input.bigCommands?.() ? { bigCommands: input.bigCommands()! } : {}),
+          // A follow-up, or a message for the process still running: the conversation's own size counts.
+          ...(short || (liveProcess && current) ? { continuation: true } : {}),
+        });
+        log.info('auto-effort', 'size', { scope, size: size.size, why: size.why, ...(size.continuation ? { continuation: true } : {}) });
         return {
           label: rung.label,
           model: rung.model,
@@ -168,6 +185,7 @@ export function startAutoEffort(input: StartAutoEffortInput): AutoEffortPlan {
           via: decision.via,
           ...(from ? { from } : {}),
           ...(reason ? { reason } : {}),
+          size,
         };
       } catch (err) {
         log.warn('auto-effort', 'pick-failed', { scope, err: String(err) });

@@ -1995,6 +1995,7 @@ function planBatchAutoEffort(
             const id = pool.pick()?.id;
             return id ? pool.windowUsed(id, kind) : undefined;
           },
+          ...(deps.profileDir ? { bigCommands: () => claudeAccountPool(deps.profileDir!).scheduler.bigCommands } : {}),
         })
       : undefined;
   return { modelPin, autoEffortPlan };
@@ -2416,7 +2417,13 @@ async function submitBatchRun(
       ? {
           pickLevel: async (resumeFrom: string | undefined) => {
             run.autoPicked = await autoEffortPlan.pick(resumeFrom, executor.hasLiveProcess(scope));
-            return run.autoPicked ? { model: run.autoPicked.model, effort: run.autoPicked.effort } : undefined;
+            return run.autoPicked
+              ? {
+                  model: run.autoPicked.model,
+                  effort: run.autoPicked.effort,
+                  ...(run.autoPicked.size ? { sizeHint: run.autoPicked.size } : {}),
+                }
+              : undefined;
           },
         }
       : {}),

@@ -1,5 +1,6 @@
 import { join } from 'node:path';
 import { type KeystorePaths } from '../../config/keystore';
+import type { SchedulingConfig } from './accounts-scheduling';
 
 export const DEFAULT_ACCOUNT_ID = 'default';
 /** How long a refusal benches an account when the CLI did not say when it resets. */
@@ -143,6 +144,8 @@ export interface ClaudeAccountsConfig {
    * kept evenly staggered (see `window-stagger.ts`).
    */
   stagger?: false;
+  /** 账户调度: pick accounts by run size and room to each one's lines ({@link SchedulingConfig}). */
+  scheduling?: SchedulingConfig;
 }
 
 export interface AccountQuotaWindow {
@@ -173,6 +176,8 @@ export interface PickedAccount {
 export interface ClaudeAccountsPaths {
   configFile: string;
   stateFile: string;
+  /** Learned 1% values, sessions' accounts and job costs ({@link AccountScheduler}); next to `stateFile` when unset. */
+  schedulingFile?: string;
   keystore: KeystorePaths;
 }
 
@@ -180,6 +185,7 @@ export function claudeAccountsPaths(profileDir: string): ClaudeAccountsPaths {
   return {
     configFile: join(profileDir, 'claude-accounts.json'),
     stateFile: join(profileDir, 'claude-accounts-state.json'),
+    schedulingFile: join(profileDir, 'account-scheduling-state.json'),
     keystore: { secretsFile: join(profileDir, 'secrets.enc'), keystoreSaltFile: join(profileDir, '.keystore.salt') },
   };
 }

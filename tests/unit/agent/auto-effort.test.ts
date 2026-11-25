@@ -166,6 +166,14 @@ describe('parseClassifierAnswer', () => {
     expect(parseClassifierAnswer(ladder, '{"level":" High "}')).toEqual({ rung: 1 });
   });
 
+  it('reads the estimate of the work (账户调度), clamping the subagent count', () => {
+    expect(
+      parseClassifierAnswer(ladder, '{"level":"high","reason":"多模块排查","subagents":4,"background":true,"long":false}'),
+    ).toEqual({ rung: 1, reason: '多模块排查', scale: { subagents: 4, background: true, long: false } });
+    expect(parseClassifierAnswer(ladder, '{"level":"max","subagents":40}')).toEqual({ rung: 3, scale: { subagents: 9 } });
+    expect(parseClassifierAnswer(ladder, '{"level":"max","subagents":"many"}')).toEqual({ rung: 3 });
+  });
+
   it('rejects unknown levels and broken JSON', () => {
     expect(parseClassifierAnswer(ladder, '{"level":"ultra"}')).toBeUndefined();
     // The rating may not pick a manual rung.

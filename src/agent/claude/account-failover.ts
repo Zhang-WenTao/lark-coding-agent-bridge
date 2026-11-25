@@ -1,8 +1,16 @@
 import { log } from '../../core/logger';
 import type { AgentEvent, AgentRun, AgentRunOptions } from '../types';
 import { WINDOW_LABELS, type ClaudeAccountPool, type PickedAccount } from './accounts';
+import type { AccountScheduler } from './accounts-scheduling';
+import { SizeTracker, type TaskSize, isBigSize, isSubagentTool, sizeRank } from './task-size';
 
 type RateLimitEvent = Extract<AgentEvent, { type: 'rate_limit' }>;
+
+/** An account to move to, and whether the run only borrows it (账户调度: it does not become the main one). */
+interface MoveTarget {
+  account: PickedAccount;
+  borrow: boolean;
+}
 
 export interface AccountFailoverDeps {
   pool: ClaudeAccountPool;
@@ -68,17 +76,46 @@ export interface AccountFailoverDeps {
  *
  * A refusal the agent works past (extra usage, a fallback model) is passed
  * through as soon as work resumes. Nothing moves once the run was stopped.
+ *
+ * 账户调度 ({@link AccountScheduler}, `scheduling.mode`): the run starts on a
+ * size (the chat's estimate, raised by the job's or the conversation's last
+ * runs), holds that size's reserve on its account while it lasts, and grows
+ * with its work (subagents, tool calls, background tasks, a task ledger, its
+ * cost). With `on`, a big run takes the account with the most room to its
+ * lines and only borrows it (the main one stays); every move goes by size and
+ * takes the reservation along at once, so runs leaving one account together
+ * spread out; and a run leaves early, at a quiet point, when the account's
+ * runs are about to bring it to a line or a big run's reserve no longer fits
+ * there. `shadow` logs all of that and changes nothing.
  */
 export function runWithAccountFailover(opts: AgentRunOptions, deps: AccountFailoverDeps): AgentRun {
   const cap = opts.accountLineCap;
-  let account = deps.pool.pick(undefined, cap);
+  const runId = opts.runId;
+  const scheduler = deps.pool.scheduler;
+  const start = startingSize(opts, scheduler);
+  const tracker = new SizeTracker(start.size, (size) => scheduler.reserveOf(size));
+  let account: PickedAccount | undefined;
+  // The run took its account by size, or kept its conversation's: the main one stays.
+  let borrowed = false;
+  if (cap) {
+    account = deps.pool.pick(undefined, cap);
+  } else {
+    const picked = deps.pool.pickFor(tracker.current, { reserveUsd: tracker.reserveUsd(), runId, ...(opts.sessionId ? { sessionId: opts.sessionId } : {}) });
+    account = picked.account;
+    borrowed = picked.borrow;
+  }
   if (!account) throw new Error('no Claude account to run on');
   // A capped run (课堂精练) borrows an account; chats keep their main one.
   const promote = (id: string): void => {
-    if (!cap) deps.pool.promote(id);
+    if (!cap && !borrowed) deps.pool.promote(id);
   };
   promote(account.id);
+  scheduler.reserve(runId, account.id, tracker.current, tracker.reserveUsd());
+  if (start.why.length > 0 || isBigSize(start.size)) {
+    log.info('claude-accounts', 'run-start-size', { runId, account: account.id, size: start.size, why: start.why, borrowed });
+  }
   let current = deps.spawn(opts, account);
+  let sessionId = opts.sessionId;
   let stopped = false;
   let tried = new Set<string>();
   // The latest user message: what a refused user turn is retried with.
@@ -93,20 +130,105 @@ export function runWithAccountFailover(opts: AgentRunOptions, deps: AccountFailo
   // The events loop is still reading the current process.
   let reading = false;
   // The next user message is going to a new process on another account.
-  let handover: { prompt: string; to: PickedAccount; reason: string } | undefined;
+  let handover: { prompt: string; to: MoveTarget; reason: string } | undefined;
+  // Subagents in flight in the current process (it cannot move while they run).
+  const subagentsInFlight = new Set<string>();
+  let unmovable = false;
+  let finished = false;
 
-  /** Another account to move to, never `from`; a capped run only to one below its cap. */
-  const elsewhere = (from: string): PickedAccount | undefined => {
-    const exclude = new Set([from]);
-    return cap ? deps.pool.pickReady(exclude, cap) : deps.pool.pickRunnable(exclude);
+  /**
+   * An account to move to, not in `exclude`. Chats go by size (账户调度;
+   * `round` is the pool's own fallback), a capped run only to an account
+   * below its cap.
+   */
+  const target = (exclude: ReadonlySet<string>, round: 'ready' | 'runnable'): MoveTarget | undefined => {
+    if (cap) {
+      const to = deps.pool.pickReady(exclude, cap);
+      return to ? { account: to, borrow: false } : undefined;
+    }
+    const reserveUsd = Math.max(scheduler.remainingUsd(runId), scheduler.reserveOf('S'));
+    const picked = deps.pool.pickFor(tracker.current, { reserveUsd, exclude, runId, round });
+    return picked.account ? { account: picked.account, borrow: picked.borrow } : undefined;
   };
 
-  /** Where a refused user turn is retried; a capped run only on an account below its cap. */
-  const refusalTarget = (): PickedAccount | undefined =>
-    cap ? deps.pool.pickReady(tried, cap) : deps.pool.pickRunnable(tried);
+  /** Another account to move to, never `from`. */
+  const elsewhere = (from: string): MoveTarget | undefined => target(new Set([from]), 'runnable');
+
+  /** Where a refused user turn is retried. */
+  const refusalTarget = (): MoveTarget | undefined => target(tried, 'runnable');
+
+  /** The run is going to `to`: its reservation goes along now, before the next run picks. */
+  const decided = (to: MoveTarget): MoveTarget => {
+    scheduler.move(runId, to.account.id);
+    return to;
+  };
+
+  /** The run is now on `to`. */
+  const moveTo = (to: MoveTarget): void => {
+    account = to.account;
+    borrowed = to.borrow;
+    scheduler.move(runId, to.account.id);
+    promote(to.account.id);
+  };
+
+  /** Background tasks or subagents in flight pin the run to its account. */
+  const settleMovable = (): void => {
+    const now = background > 0 || subagentsInFlight.size > 0;
+    if (now === unmovable) return;
+    unmovable = now;
+    scheduler.update(runId, { unmovable: now });
+  };
+
+  /** The run's work so far, as its size: the reservation follows. */
+  const track = (evt: AgentEvent, on: string): void => {
+    let grown: TaskSize | undefined;
+    if (evt.type === 'tool_use') {
+      grown = tracker.onToolUse(evt.name);
+      if (isSubagentTool(evt.name)) subagentsInFlight.add(evt.id);
+    } else if (evt.type === 'tool_result') {
+      subagentsInFlight.delete(evt.id);
+    } else if (evt.type === 'background') {
+      grown = tracker.onBackground(evt.count);
+    } else if (evt.type === 'text') {
+      grown = tracker.onText(evt.delta);
+    } else if (evt.type === 'final_text') {
+      grown = tracker.onText(evt.content);
+    } else if (evt.type === 'usage' && evt.costUsd !== undefined && evt.costUsd > 0) {
+      scheduler.noteCost(on, evt.costUsd);
+      grown = tracker.onCost(evt.costUsd);
+      if (!grown) scheduler.update(runId, { reserveUsd: tracker.reserveUsd() });
+    }
+    if (grown) {
+      scheduler.update(runId, { size: grown, reserveUsd: tracker.reserveUsd() });
+      log.info('claude-accounts', 'size-upgrade', { runId, account: on, size: grown, spentUsd: round2(tracker.spent), ...tracker.done });
+    }
+  };
+
+  /**
+   * 账户调度: why the run should leave `on` before its line, if it should —
+   * the account's runs are about to bring it to a line, or a big run's
+   * reserve no longer fits there (asked once a run). `shadow` only logs it.
+   */
+  let misfitAsked = false;
+  const earlyReason = (on: string, logged: Set<string>): string | undefined => {
+    if (cap || scheduler.mode === 'off' || !deps.pool.multi) return undefined;
+    let why: string | undefined;
+    if (scheduler.nearLine(on, runId)) why = 'near-line';
+    else if (!misfitAsked && isBigSize(tracker.current) && scheduler.misfit(runId)) {
+      misfitAsked = true;
+      why = 'misfit';
+    }
+    if (!why) return undefined;
+    if (scheduler.mode === 'on') return why;
+    if (!logged.has(why)) {
+      logged.add(why);
+      log.info('claude-accounts', 'shadow-move', { runId, account: on, why, size: tracker.current });
+    }
+    return undefined;
+  };
 
   /** Where the next user message should go instead of the current process, if anywhere. */
-  const handoverTarget = (): { to: PickedAccount; reason: string } | undefined => {
+  const handoverTarget = (): { to: MoveTarget; reason: string } | undefined => {
     const on = account!;
     if (deps.pool.isRefused(on.id)) {
       const to = elsewhere(on.id);
@@ -119,18 +241,40 @@ export function runWithAccountFailover(opts: AgentRunOptions, deps: AccountFailo
     }
     // The main account changed while the process was kept (`/accounts
     // switch`, or another run moved on and promoted its account): follow it.
-    // A capped run (课堂精练) borrows its account and does not follow.
-    if (!cap) {
+    // A capped run (课堂精练) and a run that took its account by size
+    // borrow it and do not follow.
+    if (!cap && !borrowed) {
       const main = deps.pool.accounts()[0];
       if (main && main.id !== on.id) {
         const to = deps.pool.pickRunnable();
-        if (to && to.id !== on.id) return { to, reason: '已不是主账户' };
+        if (to && to.id !== on.id) return { to: { account: to, borrow: false }, reason: '已不是主账户' };
       }
     }
     // Past a line only: background tasks that are running fine stay put.
     if (background > 0 || deps.pool.hasRoom(on.id, cap)) return undefined;
-    const to = deps.pool.pickReady(new Set([on.id]), cap);
+    const to = target(new Set([on.id]), 'ready');
     return to ? { to, reason: lineReason(deps.pool.pastLine(on.id, undefined, cap)) } : undefined;
+  };
+
+  /** The run is over: what the next runs of its conversation and job start from. */
+  const finish = (): void => {
+    if (finished) return;
+    finished = true;
+    const on = account!.id;
+    try {
+      if (sessionId) scheduler.rememberSession(sessionId, on, tracker.current);
+      if (opts.sizeKey && tracker.spent > 0) scheduler.recordJobCost(opts.sizeKey, tracker.spent);
+    } finally {
+      scheduler.release(runId);
+    }
+    log.info('claude-accounts', 'run-size', {
+      runId,
+      account: on,
+      start: start.size,
+      size: tracker.current,
+      spentUsd: round2(tracker.spent),
+      ...tracker.done,
+    });
   };
 
   async function* events(): AsyncGenerator<AgentEvent> {
@@ -139,11 +283,11 @@ export function runWithAccountFailover(opts: AgentRunOptions, deps: AccountFailo
       yield* attempts();
     } finally {
       reading = false;
+      finish();
     }
   }
 
   async function* attempts(): AsyncGenerator<AgentEvent> {
-    let sessionId = opts.sessionId;
     let switchedFrom: string | undefined;
     let reason: string | undefined;
     // The account event already went out (with the turn that announced the move).
@@ -170,32 +314,42 @@ export function runWithAccountFailover(opts: AgentRunOptions, deps: AccountFailo
 
       let refusal: RateLimitEvent | undefined;
       const held: AgentEvent[] = [];
+      // Where a refused turn kept on for background tasks goes (found at the turn's end).
+      let refusalNext: MoveTarget | undefined;
       // A refusal in a turn of the process's own, and that turn's end.
       let ownRefusal: RateLimitEvent | undefined;
       const ownHeld: AgentEvent[] = [];
-      let moveOwn: PickedAccount | undefined;
+      let moveOwn: MoveTarget | undefined;
       turnEnded = ownTurn;
       // The resumed process may never report its background tasks; the
       // count the bridge assumed for it is taken back with its first turn.
       let assumedBackground = ownTurn;
       ownTurn = false;
       background = 0;
+      subagentsInFlight.clear();
+      settleMovable();
       // Past the switch line: leave at the next quiet point.
       let pastLine = false;
+      // 账户调度: leaving before the line, and why; tried once per attempt.
+      let early: string | undefined;
+      let earlyTried = false;
+      const shadowLogged = new Set<string>();
       const inFlight = new Set<string>();
-      let leave: PickedAccount | undefined;
+      let leave: MoveTarget | undefined;
 
       for await (const evt of attempt.events) {
+        track(evt, on.id);
+        settleMovable();
         if (handover) {
           // The process is being stopped for the next user message; what it
           // still prints belongs to no turn the bridge is showing.
-          if (evt.type === 'rate_limit') deps.pool.observe(on.id, evt);
+          if (evt.type === 'rate_limit') deps.pool.observe(on.id, evt, runId);
           if (evt.type === 'system' && evt.sessionId) sessionId = evt.sessionId;
           if (evt.type === 'done' && evt.sessionId) sessionId = evt.sessionId;
           continue;
         }
         if (evt.type === 'rate_limit') {
-          deps.pool.observe(on.id, evt);
+          deps.pool.observe(on.id, evt, runId);
           if (evt.blocked && !turnEnded) {
             refusal = mergeRefusal(refusal, evt);
             continue;
@@ -204,19 +358,28 @@ export function runWithAccountFailover(opts: AgentRunOptions, deps: AccountFailo
             ownRefusal = mergeRefusal(ownRefusal, evt);
             continue;
           }
-          if (!evt.blocked && !turnEnded && !stopped && !deps.pool.hasRoom(on.id, cap)) pastLine = true;
+          if (!evt.blocked && !turnEnded && !stopped) {
+            if (!deps.pool.hasRoom(on.id, cap)) {
+              pastLine = true;
+              early = undefined;
+            } else if (!pastLine && !earlyTried) {
+              early = earlyReason(on.id, shadowLogged);
+              pastLine = early !== undefined;
+            }
+          }
         }
         if (evt.type === 'subagent_rate_limited') {
           subagentsCut = true;
           // The subagent ran on this account: it is refused, whatever the
           // main agent last heard.
-          deps.pool.observe(on.id, { type: 'rate_limit', blocked: true, at: evt.at });
+          deps.pool.observe(on.id, { type: 'rate_limit', blocked: true, at: evt.at }, runId);
           log.info('agent', 'subagent-rate-limited', { runId: opts.runId, account: on.id, taskId: evt.taskId ?? null });
         }
         if (evt.type === 'system' && evt.sessionId) sessionId = evt.sessionId;
         if (evt.type === 'background') {
           background = evt.count;
           assumedBackground = false;
+          settleMovable();
         }
         if (evt.type === 'tool_use') inFlight.add(evt.id);
         const terminal = evt.type === 'done' || evt.type === 'error';
@@ -228,7 +391,8 @@ export function runWithAccountFailover(opts: AgentRunOptions, deps: AccountFailo
           // the turn back until the idle timeout killed it (2026-10-29: four
           // subagents cut off with the main turn on a spent account).
           if (background > 0 && !stopped && !wasInterrupted(held)) {
-            if (refusalTarget()) break;
+            refusalNext = refusalTarget();
+            if (refusalNext) break;
             // Nowhere to go: the turn ends paused; its tasks report back as before.
             yield soonestReset(refusal, deps.pool);
             refusal = undefined;
@@ -271,6 +435,7 @@ export function runWithAccountFailover(opts: AgentRunOptions, deps: AccountFailo
           if (kept && subagentsCut && !stopped && evt.terminationReason !== 'interrupted' && deps.pool.isRefused(on.id)) {
             moveOwn = elsewhere(on.id);
           }
+          if (moveOwn) decided(moveOwn);
           if (moveOwn || assumedBackground) {
             yield { type: 'background', count: moveOwn ? Math.max(background, 1) : 0 };
             assumedBackground = false;
@@ -284,10 +449,17 @@ export function runWithAccountFailover(opts: AgentRunOptions, deps: AccountFailo
         if (evt.type === 'tool_result') {
           inFlight.delete(evt.id);
           if (pastLine && !refusal && !stopped && !turnEnded && inFlight.size === 0 && background === 0) {
-            leave = deps.pool.pickReady(new Set([...tried, on.id]), cap);
-            if (leave) break;
+            leave = target(new Set([...tried, on.id]), 'ready');
+            // Leaving before the line only pays where there is more room.
+            if (leave && early && !scheduler.moreRoom(leave.account.id, on.id, runId)) leave = undefined;
+            if (leave) {
+              decided(leave);
+              break;
+            }
             // Every other account is past a line too: use this one up.
             pastLine = false;
+            if (early) earlyTried = true;
+            early = undefined;
           }
         }
       }
@@ -300,23 +472,22 @@ export function runWithAccountFailover(opts: AgentRunOptions, deps: AccountFailo
           yield { type: 'done', ...(sessionId ? { sessionId } : {}), terminationReason: 'interrupted' };
           return;
         }
-        log.info('agent', 'account-handover', { runId: opts.runId, from: on.id, to: next.to.id, background });
+        log.info('agent', 'account-handover', { runId: opts.runId, from: on.id, to: next.to.account.id, background });
         if (background > 0) yield { type: 'background', count: 0 };
         switchedFrom = label;
         reason = next.reason;
-        account = next.to;
+        moveTo(next.to);
         tried = new Set();
-        promote(next.to.id);
-        current = deps.spawn({ ...opts, ...(sessionId ? { sessionId } : {}), prompt: next.prompt }, next.to);
+        current = deps.spawn({ ...opts, ...(sessionId ? { sessionId } : {}), prompt: next.prompt }, next.to.account);
         continue;
       }
 
       if (moveOwn) {
-        const next = moveOwn;
+        const next = decided(moveOwn);
         log.info('agent', 'account-background-failover', {
           runId: opts.runId,
           from: on.id,
-          to: next.id,
+          to: next.account.id,
           background,
           subagentsCut,
         });
@@ -328,7 +499,7 @@ export function runWithAccountFailover(opts: AgentRunOptions, deps: AccountFailo
         }
         // A turn of its own that tells the chat, before the resumed work runs:
         // the process keeps counting as busy until that work reports back.
-        const nextLabel = (await deps.labelOf(next).catch(() => undefined)) ?? next.label ?? next.id;
+        const nextLabel = (await deps.labelOf(next.account).catch(() => undefined)) ?? next.account.label ?? next.account.id;
         yield { type: 'account', label: nextLabel, switchedFrom: label, reason: '额度用尽，后台任务被中断' };
         yield { type: 'background', count: Math.max(background, 1) };
         yield { type: 'done', ...(sessionId ? { sessionId } : {}), terminationReason: 'normal' };
@@ -337,26 +508,30 @@ export function runWithAccountFailover(opts: AgentRunOptions, deps: AccountFailo
         reason = undefined;
         announced = true;
         ownTurn = true;
-        account = next;
+        moveTo(next);
         tried = new Set();
-        promote(next.id);
-        current = deps.spawn({ ...opts, ...(sessionId ? { sessionId } : {}), prompt: BACKGROUND_FAILOVER_PROMPT }, next);
+        current = deps.spawn({ ...opts, ...(sessionId ? { sessionId } : {}), prompt: BACKGROUND_FAILOVER_PROMPT }, next.account);
         continue;
       }
 
       if (leave) {
         const line = deps.pool.pastLine(on.id, undefined, cap);
-        log.info('agent', 'account-leave', { runId: opts.runId, from: on.id, to: leave.id, window: line?.kind ?? null });
+        log.info('agent', 'account-leave', {
+          runId: opts.runId,
+          from: on.id,
+          to: leave.account.id,
+          window: line?.kind ?? null,
+          ...(early ? { early, size: tracker.current } : {}),
+        });
         await attempt.stop();
         if (stopped) {
           yield { type: 'done', ...(sessionId ? { sessionId } : {}), terminationReason: 'interrupted' };
           return;
         }
         switchedFrom = label;
-        reason = lineReason(line);
-        account = leave;
-        promote(leave.id);
-        current = deps.spawn({ ...opts, ...(sessionId ? { sessionId } : {}), prompt: SWITCH_LINE_PROMPT }, leave);
+        reason = early && !line ? EARLY_REASONS[early] ?? lineReason(line) : lineReason(line);
+        moveTo(leave);
+        current = deps.spawn({ ...opts, ...(sessionId ? { sessionId } : {}), prompt: SWITCH_LINE_PROMPT }, leave.account);
         continue;
       }
 
@@ -364,16 +539,17 @@ export function runWithAccountFailover(opts: AgentRunOptions, deps: AccountFailo
         yield* held;
         return;
       }
-      const next = stopped || wasInterrupted(held) ? undefined : refusalTarget();
+      const next = stopped || wasInterrupted(held) ? undefined : (refusalNext ?? refusalTarget());
       if (!next) {
         yield soonestReset(refusal, deps.pool);
         yield* held;
         return;
       }
+      decided(next);
       log.info('agent', 'account-failover', {
         runId: opts.runId,
         from: on.id,
-        to: next.id,
+        to: next.account.id,
         hasSession: Boolean(sessionId),
         background,
         subagentsCut,
@@ -391,11 +567,10 @@ export function runWithAccountFailover(opts: AgentRunOptions, deps: AccountFailo
       subagentsCut = false;
       switchedFrom = label;
       reason = undefined;
-      account = next;
-      promote(next.id);
+      moveTo(next);
       current = deps.spawn(
         { ...opts, ...(sessionId ? { sessionId } : {}), prompt: failoverPrompt(lastPrompt, { subagents: cut }) },
-        next,
+        next.account,
       );
     }
   }
@@ -420,7 +595,7 @@ export function runWithAccountFailover(opts: AgentRunOptions, deps: AccountFailo
       if (target) {
         const cut = subagentsCut || background > 0;
         subagentsCut = false;
-        handover = { prompt: handoverPrompt(prompt, { subagents: cut }), to: target.to, reason: target.reason };
+        handover = { prompt: handoverPrompt(prompt, { subagents: cut }), to: decided(target.to), reason: target.reason };
         lastPrompt = prompt;
         turnEnded = false;
         void current.stop().catch(() => {});
@@ -438,6 +613,33 @@ export function runWithAccountFailover(opts: AgentRunOptions, deps: AccountFailo
 
 function lineReason(line: { kind: keyof typeof WINDOW_LABELS; line: number } | undefined): string {
   return line ? `${WINDOW_LABELS[line.kind]}用量到了 ${line.line}% 的切换线` : '到了切换线';
+}
+
+/** The card's reason for a move before the line (账户调度). */
+const EARLY_REASONS: Record<string, string> = {
+  'near-line': '快到切换线，提前换到余量更多的账户',
+  misfit: '余量不够这个任务，换到余量更多的账户',
+};
+
+/**
+ * The size a run starts on: the chat's estimate, raised by the last runs of
+ * its scheduled job and, for a short follow-up, by its conversation's last run.
+ */
+function startingSize(opts: AgentRunOptions, scheduler: AccountScheduler): { size: TaskSize; why: string[] } {
+  let size: TaskSize = opts.sizeHint?.size ?? 'S';
+  const why = [...(opts.sizeHint?.why ?? [])];
+  const raise = (to: TaskSize | undefined, label: string): void => {
+    if (!to || sizeRank(to) <= sizeRank(size)) return;
+    size = to;
+    why.push(`${label}:${to}`);
+  };
+  raise(scheduler.jobSize(opts.sizeKey), 'job');
+  if (opts.sizeHint?.continuation) raise(scheduler.sessionSize(opts.sessionId), 'session');
+  return { size, why };
+}
+
+function round2(value: number): number {
+  return Math.round(value * 100) / 100;
 }
 
 const SUBAGENT_RECOVERY =

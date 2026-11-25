@@ -31,6 +31,9 @@
  *     switch lines. Re-read whenever it changes, no restart needed.
  *   - `claude-accounts-state.json`: what each account's last run said about
  *     its quota (`rate_limit_event`), and until when a refusal benched it.
+ *   - `account-scheduling-state.json`: 账户调度's learned 1% values, the
+ *     accounts conversations last ran on, and scheduled jobs' recent costs
+ *     ({@link AccountScheduler}).
  *   - the profile keystore (`secrets.enc`) holds the tokens, as
  *     `claude-oauth-<id>`.
  */
@@ -43,4 +46,6 @@ export { SWITCH_SCORE_WEIGHTS, WORTH_MOVING_ROOM, STICKY_MARGIN, switchScore } f
 export type { AccountWindowView, AccountRow } from './accounts-score';
 export { ClaudeAccountPool, claudeAccountPool } from './accounts-pool';
 export type { ClaudeAccountPoolOptions } from './accounts-pool';
+export { AccountScheduler, DEFAULT_SCHEDULING_MODE, DEFAULT_MAX_BIG_LOAD, DEFAULT_USD_PER_PERCENT, parseSchedulingConfig } from './accounts-scheduling';
+export type { SchedulingMode, SchedulingConfig, ScheduleChoice } from './accounts-scheduling';
 export { accountsReport, offDayNote, pausedNote, findPausedAccount, pausedRefusal, accountRows, formatHoursMinutes, formatDaysHours, accountsTable, expiringFirstNote, bestSwitchTarget, findAccountRow, switchBoost, parseSwitchQuery, switchRefusal } from './accounts-report';

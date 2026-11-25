@@ -1,4 +1,5 @@
 import type { AgentCapability } from '../agent/capability';
+import type { SizeHint } from '../agent/claude/task-size';
 import { resolveEffortArg, resolveModelArg } from '../agent/models';
 import type { AgentEvent } from '../agent/types';
 import type { ProfileConfig } from '../config/profile-schema';
@@ -88,7 +89,11 @@ export interface StartRunFlowInput {
    * resumes is known (`resumeFrom` undefined: a new one). Undefined fields,
    * or no result, keep the profile's.
    */
-  pickLevel?: (resumeFrom: string | undefined) => Promise<{ model?: string; effort?: EffortLevel } | undefined>;
+  /** See AgentRunOptions.sizeKey: runs of one scheduled job share it. */
+  sizeKey?: string;
+  pickLevel?: (
+    resumeFrom: string | undefined,
+  ) => Promise<{ model?: string; effort?: EffortLevel; sizeHint?: SizeHint } | undefined>;
 }
 
 export type RunFlowRejectCode =
@@ -248,6 +253,8 @@ export async function startRunFlow(input: StartRunFlowInput): Promise<StartRunFl
       ...(input.guard ? { guard: input.guard } : {}),
       ...(input.compactWindowTokens ? { compactWindowTokens: input.compactWindowTokens } : {}),
       ...(input.runContextFile ? { runContextFile: input.runContextFile } : {}),
+      ...(level?.sizeHint ? { sizeHint: level.sizeHint } : {}),
+      ...(input.sizeKey ? { sizeKey: input.sizeKey } : {}),
       // Adapters without subagents (Codex) ignore it.
       ...(input.profileConfig.preferences.subagentModel ? { subagentModel: input.profileConfig.preferences.subagentModel } : {}),
       actor: { id: input.scope.actorId, ...(input.actorName ? { name: input.actorName } : {}) },
