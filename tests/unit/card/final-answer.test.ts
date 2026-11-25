@@ -90,6 +90,42 @@ describe('finalAnswerState', () => {
     expect(renderText(finalAnswerState(paused))).toContain(pauseNotice(paused.limit));
   });
 
+  it('keeps an answer written before a wrap-up tool call that ends on a short sign-off', () => {
+    const answer = `结论：${'配置没问题，'.repeat(40)}可以上线。`;
+    const state = run([
+      { type: 'text', delta: '我先看一下日志。' },
+      ...tool('t1'),
+      { type: 'text', delta: answer },
+      ...tool('t2'),
+      { type: 'text', delta: '已保存。' },
+      done,
+    ]);
+    const text = renderText(finalAnswerState(state));
+    expect(text).toContain(answer);
+    expect(text).toContain('已保存。');
+    expect(text).not.toContain('我先看一下日志');
+  });
+
+  it('does not pull short notes back in front of a short answer', () => {
+    const state = run([
+      { type: 'text', delta: '我先看一下日志。' },
+      ...tool('t1'),
+      { type: 'text', delta: '没问题。' },
+      done,
+    ]);
+    expect(renderText(finalAnswerState(state))).toBe('没问题。');
+  });
+
+  it('keeps a [[NO_REPLY]] tail even after a long earlier answer', () => {
+    const state = run([
+      { type: 'text', delta: '说明'.repeat(200) },
+      ...tool('t1'),
+      { type: 'text', delta: NO_REPLY_MARKER },
+      done,
+    ]);
+    expect(renderText(stripControlMarkers(finalAnswerState(state))).trim()).toBe('');
+  });
+
   it('leaves nothing to send when the answer after the tool calls is [[NO_REPLY]]', () => {
     const state = run([
       { type: 'text', delta: '我来发状态卡片。' },

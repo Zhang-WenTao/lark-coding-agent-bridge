@@ -1397,6 +1397,8 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
   });
   if (handled) {
     const dropped = pending.cancel(scope);
+    // Dropped, not run: their 稍等 would otherwise stay on for good.
+    void deps.queuedReactions?.release(dropped.map((m) => m.messageId));
     log.info('intake', 'command', { scope, droppedPending: dropped.length });
     return;
   }

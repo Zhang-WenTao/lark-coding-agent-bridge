@@ -376,9 +376,47 @@ export function finalAnswerState(state: RunState): RunState {
     let start = state.blocks.length;
     while (start > 0 && state.blocks[start - 1]?.kind !== 'tool') start--;
     const answer = text(state.blocks.slice(start));
-    blocks = answer.length > 0 ? answer : text(state.blocks);
+    blocks = answer.length > 0 ? withEarlierAnswer(state.blocks.slice(0, start), answer) : text(state.blocks);
   }
   return { ...state, blocks, reasoning: { content: '', active: false }, footer: null };
+}
+
+/** A tail shorter than this reads as a sign-off ("已保存"), not as the answer. */
+export const FINAL_ANSWER_SIGN_OFF_MAX = 40;
+/** An earlier stretch of text at least this long reads as the answer itself. */
+export const FINAL_ANSWER_EARLIER_MIN = 200;
+
+/**
+ * The agent often writes its answer, then makes one more tool call to wrap up
+ * (save a memory, send a file) and ends on a sign-off. Cutting after the last
+ * tool call would post only the sign-off, so when the tail is that short and
+ * an earlier stretch of text (between two tool calls) is long enough to be an
+ * answer, the longest such stretch goes out before the tail. Short notes
+ * ("我先看一下…") never reach the bar, and a `[[NO_REPLY]]` tail stays as is.
+ */
+function withEarlierAnswer(before: readonly Block[], tail: Block[]): Block[] {
+  const own = (blocks: readonly Block[]): string =>
+    blocks.map((b) => (b.kind === 'text' && !b.note ? b.content : '')).join('').trim();
+  const tailText = own(tail);
+  if (tailText.length >= FINAL_ANSWER_SIGN_OFF_MAX || tailText.includes(NO_REPLY_MARKER)) return tail;
+  let best: Block[] = [];
+  let current: Block[] = [];
+  const settle = () => {
+    if (own(current).length > own(best).length) best = current;
+    current = [];
+  };
+  for (const b of before) {
+    if (b.kind === 'text') current.push(b);
+    else settle();
+  }
+  settle();
+  if (own(best).length < FINAL_ANSWER_EARLIER_MIN) return tail;
+  const lastOfBest = best[best.length - 1];
+  const joint: Block[] =
+    lastOfBest?.kind === 'text' && !/\n\s*$/.test(lastOfBest.content)
+      ? [{ kind: 'text', content: '\n\n', streaming: false }]
+      : [];
+  return [...best, ...joint, ...tail];
 }
 
 /** The answer text of a run state: its final text, else its last text block. */

@@ -518,6 +518,8 @@ When COT is enabled, the bridge splits the process view and final answer into tw
 - Follow-up replies from background work get the same treatment: the background-work prefix plus that turn's answer.
 - Codex already posts its final answer apart and always sends just the answer in plain text mode; this setting does not apply to it.
 
+When all that follows the last tool call is a short sign-off (under 40 characters, e.g. "saved") and an earlier stretch of text between tool calls runs to 200 characters or more, the longest such stretch is posted with it, so an answer written before a wrap-up tool call (saving a memory, sending a file) is not cut off.
+
 To get the full record back (the notes, plus tool lines while tool-call display is on), set the profile's `preferences.textReplyFinalOnly` to `false`. Config file only (restart the profile after editing). The setting covers plain text mode only: for COT mode's final answer see above; card and markdown modes are unchanged.
 
 **Result card** (`messageReply: "final-card"`, 「结果卡片」 in `/config`): like plain text mode, nothing is posted while the run works, only the Typing reaction. When it is done, one non-streaming card goes out holding only the final answer, cut the same way as in plain text mode. There is no stop button, clock, tool block or reasoning on it, no Agent / Model / Usage / Sponsor byline, and no new-conversation or account-switch notice.
