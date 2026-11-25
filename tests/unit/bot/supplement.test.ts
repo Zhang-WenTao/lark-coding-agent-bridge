@@ -116,7 +116,7 @@ describe('run-state supplement marker', () => {
 
     expect(state.blocks).toEqual([
       { kind: 'text', content: '处理中', streaming: false },
-      { kind: 'text', content: '➕ **收到补充**：加上 EUR', streaming: false },
+      { kind: 'text', content: '➕ **收到补充**：加上 EUR', streaming: false, note: 'supplement' },
       { kind: 'text', content: '已按补充调整', streaming: true },
     ]);
   });

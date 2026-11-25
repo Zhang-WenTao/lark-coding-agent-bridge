@@ -71,11 +71,49 @@ export interface SecretsConfig {
  *   - `card`: full interactive card (tool panels, ⏹ button, footer status)
  *   - `markdown`: lightweight streaming markdown card (typewriter, no buttons)
  *   - `text`: plain markdown post sent once at run completion (no streaming)
+ *   - `final-card`: like `text`, but the answer goes out as one clean card —
+ *     no progress, buttons, tool blocks or byline (see `finalCard`)
  *
  * Pre-0.1.27 only had `card` and `text`, where `text` meant what's now called
  * `markdown`. See `messageReplyMigrated` for the auto-coercion logic.
  */
-export type MessageReplyMode = 'card' | 'markdown' | 'text';
+export type MessageReplyMode = 'card' | 'markdown' | 'text' | 'final-card';
+export const MESSAGE_REPLY_MODES: readonly MessageReplyMode[] = ['card', 'markdown', 'text', 'final-card'];
+export function isMessageReplyMode(value: unknown): value is MessageReplyMode {
+  return MESSAGE_REPLY_MODES.includes(value as MessageReplyMode);
+}
+
+/** Feishu card header colours (`header.template`). */
+export const CARD_HEADER_TEMPLATES = [
+  'blue', 'wathet', 'turquoise', 'green', 'yellow', 'orange', 'red',
+  'carmine', 'violet', 'purple', 'indigo', 'grey', 'default',
+] as const;
+export type CardHeaderTemplate = (typeof CARD_HEADER_TEMPLATES)[number];
+
+/** `messageReply: 'final-card'` appearance. Config-file only. */
+export interface FinalCardPreference {
+  /**
+   * Header bar colour, used only when the answer gets a header. Feishu takes
+   * only these presets here — no custom colour for the bar or its title.
+   * Default `violet`.
+   */
+  headerTemplate?: CardHeaderTemplate;
+  /**
+   * Image key (`img_v3_…`) shown as the header icon, e.g. the bot's avatar.
+   * Upload it with the bot's own app (`im/v1/images`, image_type `message`).
+   * Default: no icon.
+   */
+  headerIcon?: string;
+  /** A grey line under the answer naming the model. Default off. */
+  footer?: boolean;
+}
+
+/** {@link FinalCardPreference} with defaults applied. */
+export interface ResolvedFinalCard {
+  headerTemplate: CardHeaderTemplate;
+  headerIcon?: string;
+  footer: boolean;
+}
 export type CotMessagesMode = 'off' | 'brief' | 'detailed';
 /**
  * Reasoning effort levels across agents. Claude Code's `--effort` accepts
@@ -137,6 +175,18 @@ export interface AppPreferences {
    * text answer and want to hide the "工具调用过程".
    */
   showToolCalls?: boolean;
+  /**
+   * `messageReply: 'text'` only: post just the answer the run ends on (the
+   * text after its last tool call), not the notes the agent wrote between
+   * tool calls nor the tool lines. Text mode shows nothing while the run
+   * goes on, so the one message it posts reads as the reply. `false` posts
+   * the whole record again (notes, and tool lines unless `showToolCalls` is
+   * off). Agents that post their answer apart (Codex) always send just the
+   * answer in text mode. Config-file only. Default on.
+   */
+  textReplyFinalOnly?: boolean;
+  /** How `messageReply: 'final-card'` looks. Config-file only. */
+  finalCard?: FinalCardPreference;
   /**
    * Model the underlying agent runs with, forwarded as `--model`. The catalog
    * of valid values is agent-kind specific — see `agent/models.ts`. `undefined`
@@ -718,13 +768,30 @@ export function getMessageReplyMode(cfg: AppConfig): MessageReplyMode {
   if (raw === 'text' && cfg.preferences?.messageReplyMigrated !== true) {
     return 'markdown';
   }
-  if (raw === 'card' || raw === 'markdown' || raw === 'text') return raw;
+  if (isMessageReplyMode(raw)) return raw;
   return 'markdown';
+}
+
+/** `finalCard` with defaults applied; an unknown header colour falls back to violet. */
+export function getFinalCardPreference(cfg: AppConfig): ResolvedFinalCard {
+  const raw = cfg.preferences?.finalCard;
+  const template = raw?.headerTemplate;
+  const icon = typeof raw?.headerIcon === 'string' ? raw.headerIcon.trim() : '';
+  return {
+    headerTemplate: template && CARD_HEADER_TEMPLATES.includes(template) ? template : 'violet',
+    ...(icon ? { headerIcon: icon } : {}),
+    footer: raw?.footer === true,
+  };
 }
 
 /** Resolve the show-tool-calls preference with default fallback. */
 export function getShowToolCalls(cfg: AppConfig): boolean {
   return cfg.preferences?.showToolCalls !== false;
+}
+
+/** Resolve the text-mode final-answer-only preference (default on). See `textReplyFinalOnly`. */
+export function getTextReplyFinalOnly(cfg: AppConfig): boolean {
+  return cfg.preferences?.textReplyFinalOnly !== false;
 }
 
 /**

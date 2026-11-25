@@ -73,9 +73,9 @@ function findSelect(node: unknown): Select | undefined {
 }
 
 describe('configFormCard message reply picker', () => {
-  it('offers all three reply modes', () => {
+  it('offers all four reply modes', () => {
     const picker = replyPicker(configFormCard(base));
-    expect(picker.options?.map((o) => o.value)).toEqual(['text', 'markdown', 'card']);
+    expect(picker.options?.map((o) => o.value)).toEqual(['text', 'final-card', 'markdown', 'card']);
   });
 
   it('keeps `card` selected instead of silently showing it as markdown', () => {

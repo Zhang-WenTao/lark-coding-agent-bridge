@@ -40,17 +40,19 @@ import { renderCard, renderTopicOpenerCard } from '../card/run-renderer';
 import type { RunCardRenderOptions } from '../card/run-renderer';
 import {
   backgroundLeft,
+  finalAnswerState,
   finalizeIfRunning,
   initialState,
   reduce,
   stripControlMarkers,
+  type Block,
   type RunLimit,
   type RunState,
   type Terminal,
 } from '../card/run-state';
 import { renderText } from '../card/text-renderer';
 import { tryHandleCommand, type Controls } from '../commands';
-import { parseNotifyTarget, type AppConfig } from '../config/schema';
+import { parseNotifyTarget, type AppConfig, type MessageReplyMode } from '../config/schema';
 import {
   effortPrefForChat,
   getAgentStopGraceMs,
@@ -63,6 +65,8 @@ import {
   getRunIdleTimeoutMs,
   getShowToolCalls,
   getSmartSession,
+  getFinalCardPreference,
+  getTextReplyFinalOnly,
   getWorktreeCleanupIdleDays,
   resolveBotOverload,
 } from '../config/schema';
@@ -2657,7 +2661,9 @@ async function submitBatchRun(
   // Turns the agent runs on its own after this reply (a background task it
   // started reported back) go out as a follow-up reply to the same message.
   run.deliverBackgroundTurn = async (turn) => {
-    const state = backgroundTurnState(turn, filterForPrefs);
+    const state = backgroundTurnState(turn, filterForPrefs, {
+      finalAnswerOnly: !separateFinalReply && answerOnlyReply(replyMode, controls.cfg),
+    });
     if (state) {
       // The follow-up's byline reports the background turn's own consumption.
       const usage = turn.kind === 'turn' ? usageLineOf(turn.events) : undefined;
@@ -2673,6 +2679,7 @@ async function submitBatchRun(
         cardRenderOptions: cardRenderOptions.meta
           ? { ...cardRenderOptions, meta: { ...meta, usage } }
           : cardRenderOptions,
+        finalCard: getFinalCardPreference(controls.cfg),
       });
     }
     // 会话智能压缩: the turn that ends the background work may close the
@@ -2811,14 +2818,18 @@ async function deliverRunReply(
         });
       }
       run.answerIsNewMessage = true;
+      // The bubble showed the work, notes between tool calls included; the
+      // reply carries the answer the run ends on. Cut before stripping
+      // markers so a [[NO_REPLY]] answer stays the answer (see finalAnswerState).
       await sendFinalReply({
         channel,
         chatId,
         scope,
-        state: finalAnswerOnlyState(stripControlMarkers((run.lastRawState = finalState))),
+        state: stripControlMarkers(finalAnswerState((run.lastRawState = finalState))),
         replyMode,
         sendOpts,
         cardRenderOptions,
+        finalCard: getFinalCardPreference(deps.controls.cfg),
       });
       return;
     }
@@ -3113,9 +3124,9 @@ async function deliverRunReply(
     run.runLimit = latestState.limit;
     run.runError = latestState.errorMsg;
   } else {
-    // text mode: drain the agent stream without sending anything during
-    // the run, then post the final rendered text once as a plain markdown
-    // (msg_type=post) message — no card, no streaming, no typewriter.
+    // text / final-card mode: drain the agent stream without sending anything
+    // during the run, then post the answer once — as a plain markdown
+    // (msg_type=post) message, or as one clean card. No streaming either way.
     const finalState = await processAgentStream(
       handle,
       eventStream,
@@ -3125,17 +3136,25 @@ async function deliverRunReply(
       async () => {},
     );
     run.answerIsNewMessage = true;
+    // Only the answer the run ends on goes out (`final-card`, or text with
+    // `textReplyFinalOnly`). The cut comes before filterForPrefs, which drops
+    // the tool blocks it is made at and a [[NO_REPLY]] answer (see finalAnswerState).
+    const state = separateFinalReply
+      ? finalAnswerOnlyState(filterForPrefs(finalState))
+      : answerOnlyReply(replyMode, deps.controls.cfg)
+        ? filterForPrefs(finalAnswerState(finalState))
+        : filterForPrefs(finalState);
+    // filterForPrefs records what it was given; the raw state is the whole run.
+    run.lastRawState = finalState;
     await sendFinalReply({
       channel,
       chatId,
       scope,
-      state:
-        separateFinalReply
-          ? finalAnswerOnlyState(filterForPrefs(finalState))
-          : filterForPrefs(finalState),
+      state,
       replyMode,
       sendOpts,
       cardRenderOptions,
+      finalCard: getFinalCardPreference(deps.controls.cfg),
     });
     run.runTerminal = finalState.terminal;
     run.runLimit = finalState.limit;
@@ -3515,13 +3534,24 @@ function withResumedNote(card: object, at: number, locale: Locale | undefined): 
 const BACKGROUND_TURN_PREFIX = '（后台任务有了新进展）\n\n';
 
 /**
+ * Replies posted once at the end that carry only the answer the run ends on:
+ * `final-card` always, `text` unless `textReplyFinalOnly` is off.
+ */
+function answerOnlyReply(replyMode: MessageReplyMode, cfg: AppConfig): boolean {
+  return replyMode === 'final-card' || (replyMode === 'text' && getTextReplyFinalOnly(cfg));
+}
+
+/**
  * The reply state for a background turn, or undefined when it has nothing to
  * show (only tool calls, or a `[[NO_REPLY]]` answer). A stop notice is always
  * shown so a silently vanished task never looks like it is still running.
+ * `finalAnswerOnly` (text mode's `textReplyFinalOnly`) keeps just the answer
+ * the turn ends on, as for the run's own reply.
  */
 export function backgroundTurnState(
   turn: BackgroundTurn,
   filterForPrefs: (state: RunState) => RunState,
+  opts: { finalAnswerOnly?: boolean } = {},
 ): RunState | undefined {
   if (turn.kind === 'stopped') {
     const notice =
@@ -3537,8 +3567,13 @@ export function backgroundTurnState(
     });
   }
   const own = finalizeIfRunning(turn.events.reduce(reduce, initialState));
+  const answer = opts.finalAnswerOnly ? finalAnswerState(own) : own;
   // A turn that only says background work goes on (a heartbeat) has nothing to tell.
-  if (!renderText(filterForPrefs({ ...own, background: 0 })).trim()) return undefined;
+  if (!renderText(filterForPrefs({ ...answer, background: 0 })).trim()) return undefined;
+  if (opts.finalAnswerOnly) {
+    const prefix: Block = { kind: 'text', content: BACKGROUND_TURN_PREFIX, streaming: false };
+    return filterForPrefs({ ...answer, blocks: [prefix, ...answer.blocks], background: turn.background });
+  }
   const withPrefix = turn.events.reduce(
     reduce,
     reduce(initialState, { type: 'text', delta: BACKGROUND_TURN_PREFIX }),

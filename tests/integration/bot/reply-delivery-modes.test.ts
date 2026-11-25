@@ -36,8 +36,8 @@ vi.mock('@larksuite/channel', async (importOriginal) => {
 
 import { startChannel } from '../../../src/bot/channel.js';
 
-type Mode = 'cot' | 'card' | 'markdown' | 'text';
-type Where = 'p2p' | 'topic';
+type Mode = 'cot' | 'card' | 'markdown' | 'text' | 'final-card';
+type Where = 'p2p' | 'topic' | 'group';
 
 interface StreamCall {
   chatId: string;
@@ -143,11 +143,11 @@ describe('reply delivery by mode', () => {
 
 describe('an answer holding code, in card mode', () => {
   it('moves to a post below the card, which keeps a pointer to it', async () => {
-    const h = await startHarness('card', 'p2p', [
+    const h = await startHarness('card', 'p2p', { events: [
       { type: 'system', sessionId: 'sess-1' },
       { type: 'text', delta: `${ANSWER}\n\n\`\`\`sql\nSELECT 1;\n\`\`\`` },
       { type: 'done', terminationReason: 'normal' },
-    ]);
+    ] });
 
     await h.channel.handlers.message?.(p2pMessage('om_q'));
     await waitFor(() => h.channel.reactions.some((r) => r.emoji === 'DONE'));
@@ -172,7 +172,122 @@ describe('an answer holding code, in card mode', () => {
   });
 });
 
-async function startHarness(mode: Mode, where: Where, events: AgentEvent[] = RUN_EVENTS): Promise<{
+// A Claude-style run: a note, a tool call, then the answer.
+const NOTE = '我先看一下日志';
+const narratedRun = (answer: string): AgentEvent[] => [
+  { type: 'system', sessionId: 'sess-1' },
+  { type: 'text', delta: NOTE },
+  { type: 'tool_use', id: 't1', name: 'Bash', input: { command: 'tail app.log' } },
+  { type: 'tool_result', id: 't1', output: 'ok', isError: false },
+  { type: 'text', delta: answer },
+  { type: 'done', terminationReason: 'normal' },
+];
+
+/** Run one message to the end; the markdown bodies sent as standalone replies, and the CoT requests. */
+async function replyTo(mode: Mode, runEvents: AgentEvent[], preferences: Record<string, unknown> = {}) {
+  const h = await startHarness(mode, 'topic', { events: runEvents, preferences });
+  await h.channel.handlers.message?.(topicMessage('om_q'));
+  await waitFor(() => h.channel.reactions.some((r) => r.emoji === 'DONE'));
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  return {
+    sent: h.channel.sent.map((s) => (s.content as { markdown: string }).markdown),
+    cotBodies: h.cotRequests.map((r) => r.body).join('\n'),
+  };
+}
+
+describe('COT mode with tool calls', () => {
+  it('shows the notes in the bubble and replies with only the answer', async () => {
+    const { sent, cotBodies } = await replyTo('cot', narratedRun(ANSWER));
+    expect(cotBodies).toContain(NOTE);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toContain(ANSWER);
+    expect(sent[0]).not.toContain(NOTE);
+  });
+
+  it('posts nothing when the answer after the tool calls is [[NO_REPLY]]', async () => {
+    const { sent } = await replyTo('cot', narratedRun('[[NO_REPLY]]'));
+    expect(sent).toEqual([]);
+  });
+});
+
+describe('final-card mode', () => {
+  type Card = { header?: { template: string; title: { content: string } }; body: { elements: unknown[] } };
+  const MESSAGES = { p2p: p2pMessage, topic: topicMessage, group: groupMessage };
+
+  async function run(where: Where, events: AgentEvent[], failCards = false) {
+    const h = await startHarness('final-card', where, { events, failCards });
+    const msg = MESSAGES[where]('om_q');
+    await h.channel.handlers.message?.(msg);
+    await waitFor(() => h.channel.reactions.some((r) => r.emoji === 'DONE'));
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    return { h, msg };
+  }
+
+  it.each(['p2p', 'topic', 'group'] as const)('replies in a %s chat with one card holding only the answer', async (where) => {
+    const { h, msg } = await run(where, narratedRun(ANSWER));
+    // Nothing while it runs but the working reaction.
+    expect(h.channel.streams).toEqual([]);
+    expect(h.channel.reactions.filter((r) => r.messageId === 'om_q').map((r) => r.emoji)).toEqual(['Typing', 'DONE']);
+    expect(h.channel.sent).toHaveLength(1);
+    const reply = h.channel.sent[0]!;
+    expect(reply.chatId).toBe(msg.chatId);
+    expect(reply.options).toEqual({ replyTo: 'om_q', ...(where === 'topic' ? { replyInThread: true } : {}) });
+    const card = (reply.content as { card: Card }).card;
+    expect(card.header).toBeUndefined();
+    const json = JSON.stringify(card);
+    expect(json).toContain(ANSWER);
+    expect(json).not.toContain(NOTE);
+    expect(json).not.toContain('tail app.log');
+  });
+
+  it('gives a long answer a violet header titled with its topic', async () => {
+    const { h } = await run('topic', narratedRun(`三个区：\n\n| 区 | Pod |\n|---|---|\n| eur | 12 |`));
+    const card = (h.channel.sent[0]!.content as { card: Card }).card;
+    expect(card.header).toEqual({ template: 'violet', title: { tag: 'plain_text', content: '三个区' } });
+  });
+
+  it('posts nothing when the answer after the tool calls is [[NO_REPLY]]', async () => {
+    const { h } = await run('group', narratedRun('[[NO_REPLY]]'));
+    expect(h.channel.sent).toEqual([]);
+  });
+
+  it('posts the answer as markdown when Feishu refuses the card', async () => {
+    const { h } = await run('topic', narratedRun(ANSWER), true);
+    expect(h.channel.sent).toHaveLength(1);
+    const body = (h.channel.sent[0]!.content as { markdown: string }).markdown;
+    expect(body).toContain(ANSWER);
+    expect(body).not.toContain(NOTE);
+  });
+});
+
+describe('text mode with tool calls (textReplyFinalOnly)', () => {
+  it('posts only the answer after the last tool call', async () => {
+    const { sent } = await replyTo('text', narratedRun(ANSWER));
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toContain(ANSWER);
+    expect(sent[0]).not.toContain(NOTE);
+    expect(sent[0]).not.toContain('tail app.log');
+  });
+
+  it('posts the whole record when textReplyFinalOnly is off', async () => {
+    const { sent } = await replyTo('text', narratedRun(ANSWER), { textReplyFinalOnly: false });
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toContain(NOTE);
+    expect(sent[0]).toContain('tail app.log');
+    expect(sent[0]).toContain(ANSWER);
+  });
+
+  it('posts nothing when the answer after the tool calls is [[NO_REPLY]]', async () => {
+    const { sent } = await replyTo('text', narratedRun('[[NO_REPLY]]'));
+    expect(sent).toEqual([]);
+  });
+});
+
+async function startHarness(
+  mode: Mode,
+  where: Where,
+  opts: { events?: AgentEvent[]; preferences?: Record<string, unknown>; failCards?: boolean } = {},
+): Promise<{
   channel: FakeLarkChannel;
   agent: FakeAgentAdapter;
   sessions: SessionStore;
@@ -183,18 +298,19 @@ async function startHarness(mode: Mode, where: Where, events: AgentEvent[] = RUN
   const base = createDefaultProfileConfig({
     agentKind: 'claude',
     accounts: { app: { id: 'cli_test', secret: 'secret', tenant: 'feishu' } },
-    access: { allowedUsers: ['ou_user'], allowedChats: ['oc_topic'] },
+    access: { allowedUsers: ['ou_user'], allowedChats: ['oc_topic', 'oc_group'] },
     preferences: {
       messageReply: mode === 'cot' ? 'markdown' : mode,
       messageReplyMigrated: true,
       ...(mode === 'cot' ? { cotMessages: 'brief' as const } : {}),
+      ...opts.preferences,
     },
   });
   const profileConfig = { ...base, workspaces: { ...base.workspaces, default: workspace } };
   const sessions = new SessionStore(join(tmp.profile, 'sessions.json'));
   const workspaces = new WorkspaceStore(join(tmp.profile, 'workspaces.json'));
-  const agent = new FakeAgentAdapter({ events });
-  const channel = createFakeLarkChannel(where);
+  const agent = new FakeAgentAdapter({ events: opts.events ?? RUN_EVENTS });
+  const channel = createFakeLarkChannel(where, opts.failCards === true);
   sdkMock.channel = channel;
 
   // CoT talks to Feishu over plain fetch, not through the SDK channel.
@@ -236,7 +352,7 @@ function jsonResponse(data: unknown): Response {
   return new Response(JSON.stringify(data), { status: 200, headers: { 'Content-Type': 'application/json' } });
 }
 
-function createFakeLarkChannel(where: Where): FakeLarkChannel {
+function createFakeLarkChannel(where: Where, failCards = false): FakeLarkChannel {
   const handlers: FakeLarkChannel['handlers'] = {};
   const sent: FakeLarkChannel['sent'] = [];
   const streams: StreamCall[] = [];
@@ -268,12 +384,14 @@ function createFakeLarkChannel(where: Where): FakeLarkChannel {
     async connect() {},
     async disconnect() {},
     async getChatMode() {
-      return where === 'topic' ? 'topic' : 'p2p';
+      return where;
     },
     getConnectionStatus() {
       return { state: 'connected', reconnectAttempts: 0 };
     },
     async send(chatId, content, options) {
+      // Feishu refusing a card, e.g. 230099 (too many tables).
+      if (failCards && (content as { card?: unknown }).card) throw new Error('230099 card rejected');
       sent.push({ chatId, content, options });
       return { messageId: `om_sent_${sent.length}` };
     },
@@ -323,6 +441,22 @@ function p2pMessage(messageId: string): NormalizedMessage {
     resources: [],
     mentions: [],
     mentionedBot: false,
+    createTime: 1760000001000,
+  } as unknown as NormalizedMessage;
+}
+
+function groupMessage(messageId: string): NormalizedMessage {
+  return {
+    messageId,
+    chatId: 'oc_group',
+    chatType: 'group',
+    senderId: 'ou_user',
+    senderName: 'User',
+    content: '问个问题',
+    rawContentType: 'text',
+    resources: [],
+    mentions: [],
+    mentionedBot: true,
     createTime: 1760000001000,
   } as unknown as NormalizedMessage;
 }

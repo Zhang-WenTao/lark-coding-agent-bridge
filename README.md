@@ -504,11 +504,46 @@ Jobs are stored per profile in `jobs.json` (see Data directories).
 
 `/config` controls three presentation settings:
 
-- **Message reply mode**: `message card` streams the final reply; `plain text` sends once after the run finishes.
+- **Message reply mode**: `message card` streams the final reply; `plain text` sends once after the run finishes, by default only the final answer (see below); `result card` also sends once at the end, as a card holding only the answer (see below); `interactive card` has tool panels and a stop button.
 - **Tool-call display**: controls whether tool blocks appear in the final card / markdown reply.
 - **COT process message**: `off` sends only the final reply; `brief` first sends a COT message with agent progress text and tool summaries; `detailed` also includes tool args and truncated output.
 
-When COT is enabled, the bridge splits the process view and final answer into two messages. The COT message is for tracing what the agent did; the final answer is still generated from the agent's raw text, without heuristic bridge-side filtering. If an agent emits final-answer text as ordinary stream text, that text can also appear in the COT process message.
+When COT is enabled, the bridge splits the process view and final answer into two messages. The COT message is for tracing what the agent did, and the agent's notes between tool calls appear only there. The final-answer message carries just what the agent wrote after its last tool call, or the final answer the agent reported on its own (Codex). The cut follows the same rule as plain text mode below: by event structure, not a guess at the wording; an answer of `[[NO_REPLY]]` means no reply. The COT message streams all of the agent's text, so the answer also appears there once.
+
+**Plain text mode sends only the final answer**: the run posts one message, and while it works only the Typing reaction shows. So by default the message carries just what the agent wrote after its last tool call, the answer it gives once its work is done. Notes between tool calls ("let me check the logs…") and tool lines are left out. The cut follows the event structure, not a guess at the wording.
+
+- A run with no tool calls: all its text, as before.
+- A run that ends before it gets to an answer (stopped on a tool call: `/stop`, an error, a quota pause, the idle timeout): it keeps what the agent said, together with the stop / error / pause notice.
+- An answer of `[[NO_REPLY]]`: no reply. Notes before it used to go out as the reply; they no longer do.
+- Follow-up replies from background work get the same treatment: the background-work prefix plus that turn's answer.
+- Codex already posts its final answer apart and always sends just the answer in plain text mode; this setting does not apply to it.
+
+To get the full record back (the notes, plus tool lines while tool-call display is on), set the profile's `preferences.textReplyFinalOnly` to `false`. Config file only (restart the profile after editing). The setting covers plain text mode only: for COT mode's final answer see above; card and markdown modes are unchanged.
+
+**Result card** (`messageReply: "final-card"`, 「结果卡片」 in `/config`): like plain text mode, nothing is posted while the run works, only the Typing reaction. When it is done, one non-streaming card goes out holding only the final answer, cut the same way as in plain text mode. There is no stop button, clock, tool block or reasoning on it, no Agent / Model / Usage / Sponsor byline, and no new-conversation or account-switch notice.
+
+- A short answer (6 lines or fewer, no table) has no header bar and reads like a message.
+- A long answer (more than 6 lines, or a table) gets a header bar titled with the answer's topic, not the bot's name (the sender line already shows that):
+  - the answer's leading `#` / `##` / `###` heading, which then leaves the body;
+  - else its opening sentence, up to the first full stop or colon, cut at the first comma when long, at most 24 characters;
+  - the bot's name only when the answer opens with a table or code.
+
+  For sharper titles, have the agent's reply style open long answers with a `## topic` line.
+- A run that did not finish (stopped, failed, paused for quota, idle timeout) gets one small grey line saying why under the answer, never a block of error text.
+- An answer of `[[NO_REPLY]]` gets no reply.
+- A card over Feishu's size limit, or one Feishu refuses (too many tables, say), goes out as a plain-text post instead, so the answer is not lost.
+- Follow-up replies from background work are sent as the same card.
+- The long-run notice works as in plain text mode: the answer is a new message, so DMs get no extra notice, and groups / topics still @ the requester.
+
+Its look is set in the config file only (the profile's `preferences.finalCard`; restart the profile after editing):
+
+```json
+"finalCard": { "headerTemplate": "violet", "headerIcon": "img_v3_xxx", "footer": false }
+```
+
+- `headerTemplate`: the header bar colour, one of Feishu's card templates (`blue`, `wathet`, `turquoise`, `green`, `yellow`, `orange`, `red`, `carmine`, `violet`, `purple`, `indigo`, `grey`, `default`). Default `violet`; any other value is treated as `violet`. Feishu allows only these presets for the header: neither the bar nor its title takes a custom colour.
+- `headerIcon`: an image key shown at the left of the header bar, such as the bot's avatar. Upload it with the bot's own app (`im/v1/images`, `image_type` `message`). Default: no icon.
+- `footer`: `true` adds one small grey line under the answer with the model name. Default off.
 
 ### Long-run completion notice
 

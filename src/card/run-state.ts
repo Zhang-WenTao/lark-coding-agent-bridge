@@ -13,7 +13,13 @@ export interface ToolEntry {
 }
 
 export type Block =
-  | { kind: 'text'; content: string; streaming: boolean }
+  | {
+      kind: 'text';
+      content: string;
+      streaming: boolean;
+      /** Set on lines the bridge adds itself (account switch, mid-run supplement), not the agent. */
+      note?: 'account' | 'supplement';
+    }
   | { kind: 'tool'; tool: ToolEntry };
 
 export type FooterStatus = 'thinking' | 'tool_running' | 'streaming' | null;
@@ -163,6 +169,7 @@ export function reduce(state: RunState, evt: AgentEvent): RunState {
         kind: 'text',
         content: `🔄 **账户 ${evt.switchedFrom} ${evt.reason ?? '额度用尽'}，已切换到 ${evt.label} 继续**\n\n`,
         streaming: false,
+        note: 'account',
       };
       const { limit: _limit, ...rest } = state;
       return {
@@ -191,6 +198,7 @@ export function reduce(state: RunState, evt: AgentEvent): RunState {
         kind: 'text',
         content: `➕ **收到补充**：${evt.preview}`,
         streaming: false,
+        note: 'supplement',
       };
       return {
         ...state,
@@ -340,6 +348,37 @@ export function stripSessionMarker(state: RunState): RunState {
 /** Agent-side reply markers: `[[NO_REPLY]]` answers, `[[BRIEF…]]` and a trailing `[[NEW_SESSION…]]`. */
 export function stripControlMarkers(state: RunState): RunState {
   return stripNoReply(stripSessionMarker(state));
+}
+
+/**
+ * The run cut down to the answer it ends on, for a reply posted once at the
+ * end (text mode, and the answer after a CoT bubble, which already showed
+ * the work): the final text when the agent reported one (Codex), else
+ * the text after the last tool call — what the agent wrote once its work was
+ * done. Claude never reports a final text, so without this cut its notes
+ * between tool calls ("我先看一下…") end up in the reply.
+ *
+ * A run that never got past a tool call (stopped, failed or paused in the
+ * middle of its work) has no such text: it keeps everything it said, so the
+ * terminal notice is not all that is left.
+ *
+ * Pass the raw state, before `stripControlMarkers` and the `showToolCalls`
+ * filter: tool blocks mark where the answer starts, and a `[[NO_REPLY]]`
+ * answer has to still be the answer when markers are stripped afterwards —
+ * cutting after the strip would fall back to the notes before it.
+ */
+export function finalAnswerState(state: RunState): RunState {
+  const text = (blocks: readonly Block[]): Block[] => blocks.filter((b) => b.kind === 'text');
+  let blocks: Block[];
+  if (state.finalText) {
+    blocks = [{ kind: 'text', content: state.finalText, streaming: false }];
+  } else {
+    let start = state.blocks.length;
+    while (start > 0 && state.blocks[start - 1]?.kind !== 'tool') start--;
+    const answer = text(state.blocks.slice(start));
+    blocks = answer.length > 0 ? answer : text(state.blocks);
+  }
+  return { ...state, blocks, reasoning: { content: '', active: false }, footer: null };
 }
 
 /** The answer text of a run state: its final text, else its last text block. */

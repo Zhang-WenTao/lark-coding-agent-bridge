@@ -27,6 +27,7 @@ import {
   getSmartSession,
   getWorktreeCleanupIdleDays,
   getShowToolCalls,
+  isMessageReplyMode,
 } from '../../config/schema';
 import type {
   LarkCliIdentityPreset,
@@ -143,8 +144,8 @@ async function submitConfig(ctx: CommandContext): Promise<void> {
   const fv = ctx.formValue ?? {};
   const rawReply = String(fv.message_reply ?? '').trim();
   const messageReply: MessageReplyMode =
-    rawReply === 'markdown' || rawReply === 'text' || rawReply === 'card'
-      ? (rawReply as MessageReplyMode)
+    isMessageReplyMode(rawReply)
+      ? rawReply
       : getMessageReplyMode(ctx.controls.cfg);
   const rawTools = String(fv.show_tool_calls ?? '').trim();
   const showToolCalls = rawTools !== 'hide';

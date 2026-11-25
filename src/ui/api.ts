@@ -35,6 +35,7 @@ import {
   getShowToolCalls,
   getSmartSession,
   getWorktreeCleanupIdleDays,
+  isMessageReplyMode,
   type AppPreferences,
   type CotMessagesMode,
   type EffortLevel,
@@ -251,7 +252,7 @@ function parseConfigBody(state: MutableProfileState, body: unknown): ParsedConfi
         : getEffort(state.cfg);
 
   const messageReply: MessageReplyMode =
-    fv.messageReply === 'markdown' || fv.messageReply === 'text' || fv.messageReply === 'card'
+    isMessageReplyMode(fv.messageReply)
       ? fv.messageReply
       : getMessageReplyMode(state.cfg);
   const showToolCalls =
