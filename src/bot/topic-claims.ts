@@ -26,8 +26,13 @@ interface Claim {
 
 /** How long a claim stands: past it the quoted message is old news. */
 export const TOPIC_CLAIM_TTL_MS = 15_000;
-/** How long a lone merge_forward waits for the note quoting it. */
-export const FORWARD_NOTE_HOLD_MS = 1_500;
+/**
+ * How long a lone merge_forward waits for the note quoting it. A note sent
+ * with the forward lands within about 1.5 s of it (73 of 74 such pairs
+ * measured); one typed afterwards comes 8 s or more later, past any wait
+ * worth making the forward sit through.
+ */
+export const FORWARD_NOTE_HOLD_MS = 1_800;
 
 const claims = new Map<string, Claim>();
 const waiters = new Map<string, (claim: Claim) => void>();

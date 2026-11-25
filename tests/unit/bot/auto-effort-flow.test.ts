@@ -143,6 +143,70 @@ describe('startAutoEffort', () => {
   });
 });
 
+describe('startAutoEffort rating wait', () => {
+  beforeEach(() => {
+    classifyMock.mockReset();
+  });
+
+  function deferred<T>() {
+    let resolve!: (v: T) => void;
+    const promise = new Promise<T>((r) => {
+      resolve = r;
+    });
+    return { promise, resolve };
+  }
+
+  it('starts a follow-up on its rung without waiting, and a late rating moves the next message', async () => {
+    const store = new AutoEffortStore();
+    store.set('p2p:ou_owner', { rung: 0, downVotes: 0, handle: 'sess-1' });
+    const slow = deferred<{ rung: number; reason?: string }>();
+    classifyMock.mockReturnValue(slow.promise);
+    const p = plan(store, { texts: ['帮我把账户调度的评估脚本再补一个维度'] });
+    const a = await p.pick('sess-1', false);
+    expect(a).toMatchObject({ label: 'medium', via: 'stay' });
+    expect(a?.size?.continuation).toBe(true);
+    slow.resolve({ rung: 2, reason: '多文件改动' });
+    await new Promise((r) => setTimeout(r, 0));
+    p.finish({ handle: 'sess-1', terminal: 'done', durationMs: 30_000 });
+    // The next message starts where the late rating put the conversation.
+    expect(await plan(store, { texts: ['继续'] }).pick('sess-1', false)).toMatchObject({ label: 'xhigh', via: 'stay' });
+  });
+
+  it('keeps the outcome when the late rating lands after the run ended', async () => {
+    const store = new AutoEffortStore();
+    store.set('p2p:ou_owner', { rung: 0, downVotes: 0, handle: 'sess-1' });
+    const slow = deferred<{ rung: number }>();
+    classifyMock.mockReturnValue(slow.promise);
+    const p = plan(store);
+    expect(await p.pick('sess-1', false)).toMatchObject({ label: 'medium' });
+    p.finish({ handle: 'sess-1', terminal: 'done', durationMs: 30_000 });
+    slow.resolve({ rung: 1 });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(store.forConversation('p2p:ou_owner', 'sess-1')).toMatchObject({ rung: 1, last: { terminal: 'done' } });
+  });
+
+  it('caps the wait on a new conversation, then lets the rating set the next message', async () => {
+    const store = new AutoEffortStore();
+    const slow = deferred<{ rung: number }>();
+    classifyMock.mockReturnValue(slow.promise);
+    const p = plan(store, { ratingWaitMs: { followUp: 0, fresh: 5 } });
+    expect(await p.pick(undefined, false)).toMatchObject({ label: 'medium', via: 'fresh' });
+    p.finish({ handle: 'sess-1', terminal: 'done', durationMs: 10_000 });
+    slow.resolve({ rung: 2 });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(store.forConversation('p2p:ou_owner', 'sess-1')).toMatchObject({ rung: 2 });
+  });
+
+  it('waits for a quick rating on a new conversation', async () => {
+    const store = new AutoEffortStore();
+    classifyMock.mockReturnValue(new Promise((r) => setTimeout(() => r({ rung: 2 }), 5)));
+    expect(await plan(store, { ratingWaitMs: { followUp: 0, fresh: 1_000 } }).pick(undefined, false)).toMatchObject({
+      label: 'xhigh',
+      via: 'fresh',
+    });
+  });
+});
+
 describe('startAutoEffort Fable quota', () => {
   beforeEach(() => {
     classifyMock.mockReset();

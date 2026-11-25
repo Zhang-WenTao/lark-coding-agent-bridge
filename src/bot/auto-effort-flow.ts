@@ -4,6 +4,7 @@ import {
   decideRung,
   forcedRung,
   isShortFollowUp,
+  type AutoEffortScopeState,
   type AutoEffortSettings,
   type AutoEffortStore,
   type ClassifierAnswer,
@@ -53,7 +54,28 @@ export interface StartAutoEffortInput {
   windowUsed?: (kind: string) => number | undefined;
   /** Command prefixes that start big work, over the built-in ones (`scheduling.bigCommands`). */
   bigCommands?: () => Readonly<Record<string, TaskSize>> | undefined;
+  /** How long the run waits for the rating (defaults: {@link RATING_WAIT_MS}). */
+  ratingWaitMs?: { followUp: number; fresh: number };
   now?: () => number;
+}
+
+/**
+ * How long a run waits for the rating before it starts. The rating takes
+ * about 4 s (median; up to 30 s), which was most of the delay before a
+ * reply started. A follow-up in a conversation that already has a rung
+ * starts on it right away and the rating, when it lands, sets the rung for
+ * the next message; a new conversation has nothing to go on, so it waits,
+ * up to a cap.
+ */
+export const RATING_WAIT_MS = { followUp: 0, fresh: 6_000 } as const;
+
+/** `p` if it settles within `ms`; with `ms` 0 an already-settled `p` still counts. */
+function within<T>(p: Promise<T>, ms: number): Promise<{ done: true; value: T } | { done: false }> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<{ done: false }>((resolve) => {
+    timer = setTimeout(() => resolve({ done: false }), ms);
+  });
+  return Promise.race([p.then((value) => ({ done: true as const, value })), timeout]).finally(() => clearTimeout(timer));
 }
 
 /** `xhigh（自动↑）` for the reply card's Effort line. */
@@ -94,7 +116,12 @@ export function startAutoEffort(input: StartAutoEffortInput): AutoEffortPlan {
           { cwd: input.classify.cwd, env: input.classify.env(), ...(input.classify.binary ? { binary: input.classify.binary } : {}) },
         ).catch(() => undefined)
       : Promise.resolve(undefined);
+  const wait = input.ratingWaitMs ?? RATING_WAIT_MS;
   let picked: { rung: number; downVotes: number } | undefined;
+  /** The rung the run itself is on (`picked` may move on when a late rating lands). */
+  let ranOn: number | undefined;
+  /** What the store last got for this run, so a late rating keeps the handle and outcome. */
+  let record: { handle?: string; last?: AutoEffortScopeState['last'] } = {};
   // Models that just failed, plus those whose own window is past the line.
   const blockedModels = (): Set<string> => {
     const out = store.blockedModels(now());
@@ -107,6 +134,30 @@ export function startAutoEffort(input: StartAutoEffortInput): AutoEffortPlan {
       }
     }
     return out;
+  };
+
+  // The run started without the rating: when it lands, it sets the rung the
+  // conversation's next message starts from (the run keeps its own).
+  const applyLateRating = (allowed: number[], started: RungDecision): void => {
+    void rating.then((rated) => {
+      if (!rated || !picked) return;
+      const next = decideRung({
+        ladder,
+        allowed,
+        current: { rung: started.rung, downVotes: started.downVotes },
+        target: rated.rung,
+      });
+      picked = { rung: next.rung, downVotes: next.downVotes };
+      store.set(scope, { rung: next.rung, downVotes: next.downVotes, ...record }, now());
+      log.info('auto-effort', 'late-rating', {
+        scope,
+        ran: ladder[started.rung]?.label,
+        next: ladder[next.rung]?.label,
+        via: next.via,
+        ...(rated.reason ? { reason: rated.reason } : {}),
+        waitedMs: now() - startedAt,
+      });
+    });
   };
 
   return {
@@ -127,6 +178,7 @@ export function startAutoEffort(input: StartAutoEffortInput): AutoEffortPlan {
         let decision: RungDecision;
         let reason: string | undefined;
         let scale: RatingScale | undefined;
+        let late = false;
         if (liveProcess && current) {
           // The message goes to the process this scope still runs: it keeps its model and effort.
           decision = { rung: current.rung, downVotes: current.downVotes, via: 'stay' };
@@ -136,7 +188,9 @@ export function startAutoEffort(input: StartAutoEffortInput): AutoEffortPlan {
             ? decideRung({ ladder, allowed, current, target: current.rung })
             : decideRung({ ladder, allowed });
         } else {
-          const rated = await rating;
+          const waitMs = forced !== undefined ? 0 : current ? wait.followUp : wait.fresh;
+          const settled = await within(rating, waitMs);
+          const rated = settled.done ? settled.value : undefined;
           reason = rated?.reason;
           scale = rated?.scale;
           decision = decideRung({
@@ -146,20 +200,18 @@ export function startAutoEffort(input: StartAutoEffortInput): AutoEffortPlan {
             ...(rated ? { target: rated.rung } : {}),
             ...(forced !== undefined ? { forced } : {}),
           });
+          if (!settled.done) {
+            late = true;
+            if (!current) log.info('auto-effort', 'rating-timeout', { scope, waitMs });
+            applyLateRating(allowed, decision);
+          }
         }
         const rung = ladder[decision.rung]!;
         const from = current ? ladder[current.rung]?.label : undefined;
         picked = { rung: decision.rung, downVotes: decision.downVotes };
-        store.set(
-          scope,
-          {
-            rung: decision.rung,
-            downVotes: decision.downVotes,
-            ...(resumeFrom ? { handle: resumeFrom } : {}),
-            ...(current?.last ? { last: current.last } : {}),
-          },
-          now(),
-        );
+        ranOn = decision.rung;
+        record = { ...(resumeFrom ? { handle: resumeFrom } : {}), ...(current?.last ? { last: current.last } : {}) };
+        store.set(scope, { rung: decision.rung, downVotes: decision.downVotes, ...record }, now());
         log.info('auto-effort', 'picked', {
           scope,
           rung: rung.label,
@@ -167,6 +219,7 @@ export function startAutoEffort(input: StartAutoEffortInput): AutoEffortPlan {
           ...(from ? { from } : {}),
           ...(reason ? { reason } : {}),
           short,
+          ...(late ? { ratingPending: true } : {}),
           waitedMs: now() - startedAt,
         });
         const size = preRunSize({
@@ -175,7 +228,7 @@ export function startAutoEffort(input: StartAutoEffortInput): AutoEffortPlan {
           text,
           ...(input.bigCommands?.() ? { bigCommands: input.bigCommands()! } : {}),
           // A follow-up, or a message for the process still running: the conversation's own size counts.
-          ...(short || (liveProcess && current) ? { continuation: true } : {}),
+          ...(short || (liveProcess && current) || (late && current) ? { continuation: true } : {}),
         });
         log.info('auto-effort', 'size', { scope, size: size.size, why: size.why, ...(size.continuation ? { continuation: true } : {}) });
         return {
@@ -193,8 +246,8 @@ export function startAutoEffort(input: StartAutoEffortInput): AutoEffortPlan {
       }
     },
     finish(outcome) {
-      if (!picked) return;
-      const rung = ladder[picked.rung];
+      if (!picked || ranOn === undefined) return;
+      const rung = ladder[ranOn];
       // A failed run on a model other than the bottom one (Fable): its quota
       // may be spent, so skip it for a while instead of failing again.
       // "Fable 5.2 requires usage credits" ends the run as paused (read as a
@@ -203,16 +256,11 @@ export function startAutoEffort(input: StartAutoEffortInput): AutoEffortPlan {
         store.blockModel(rung.model, now());
         log.warn('auto-effort', 'model-blocked', { scope, model: rung.model });
       }
-      store.set(
-        scope,
-        {
-          rung: picked.rung,
-          downVotes: picked.downVotes,
-          ...(outcome.handle ? { handle: outcome.handle } : {}),
-          last: { ...(outcome.terminal ? { terminal: outcome.terminal } : {}), durationMs: outcome.durationMs },
-        },
-        now(),
-      );
+      record = {
+        ...(outcome.handle ? { handle: outcome.handle } : record.handle ? { handle: record.handle } : {}),
+        last: { ...(outcome.terminal ? { terminal: outcome.terminal } : {}), durationMs: outcome.durationMs },
+      };
+      store.set(scope, { rung: picked.rung, downVotes: picked.downVotes, ...record }, now());
     },
   };
 }

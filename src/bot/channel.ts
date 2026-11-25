@@ -656,7 +656,9 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
         // Treat threadId as authoritative for IM messages so scope and replies
         // stay isolated per topic.
         const mode = firstMsg.threadId ? 'topic' : resolvedMode;
-        if (firstMsg.threadId && resolvedMode !== 'topic') {
+        // A private chat's threads (auto topics) can't make it a topic group:
+        // keep its cached mode instead of resolving it again on every message.
+        if (firstMsg.threadId && resolvedMode !== 'topic' && resolvedMode !== 'p2p') {
           chatModeCache.invalidate(firstMsg.chatId);
           logThreadModeOverride({
             chatId: firstMsg.chatId,
@@ -3181,6 +3183,43 @@ async function deliverRunReply(
 }
 
 async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
+  const { channel, batch, controls } = deps;
+  if (batch.length === 0) return;
+  const firstMsg = batch[0];
+  const lastMsg = batch[batch.length - 1];
+  if (!firstMsg || !lastMsg) return;
+
+  const chatId = firstMsg.chatId;
+  const threadId = firstMsg.threadId;
+
+  if (await stopForBotOverload(deps, { chatId, threadId, lastMsg })) return;
+
+  // The "Typing" reaction goes on as soon as the batch is taken: before the
+  // inputs, the prompt and the rung are settled (seconds, at times), so the
+  // sender sees the message was noticed. COT mode posts its own bubble instead.
+  const earlyReaction =
+    getCotMessages(controls.cfg) === 'off' ? addWorkingReaction(channel, lastMsg.messageId) : undefined;
+  const taken = { firstMsg, lastMsg, chatId, threadId, earlyReaction, handedOver: false };
+  try {
+    await runTakenBatch(deps, taken);
+  } catch (err) {
+    if (!taken.handedOver) scheduleWorkingReactionCleanup(channel, lastMsg.messageId, earlyReaction);
+    throw err;
+  }
+}
+
+async function runTakenBatch(
+  deps: RunBatchDeps,
+  taken: {
+    firstMsg: NormalizedMessage;
+    lastMsg: NormalizedMessage;
+    chatId: string;
+    threadId: string | undefined;
+    earlyReaction: Promise<string | undefined> | undefined;
+    /** Set once the run owns the reaction (it clears it when the run ends). */
+    handedOver: boolean;
+  },
+): Promise<void> {
   const {
     channel,
     batch,
@@ -3193,16 +3232,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     runs,
     autoResumer,
   } = deps;
-  if (batch.length === 0) return;
-  const firstMsg = batch[0];
-  const lastMsg = batch[batch.length - 1];
-  if (!firstMsg || !lastMsg) return;
-
-  const chatId = firstMsg.chatId;
-  const threadId = firstMsg.threadId;
-
-  if (await stopForBotOverload(deps, { chatId, threadId, lastMsg })) return;
-
+  const { firstMsg, lastMsg, chatId, threadId, earlyReaction } = taken;
   const { attachments, batchIds, quoteTargets, quotes } = await resolveBatchInputs(deps);
 
   const { modelPin, autoEffortPlan } = planBatchAutoEffort(deps, { chatId, attachments, quotes });
@@ -3253,7 +3283,11 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     knowledgeDedupe,
     prompt,
   });
-  if (!started) return;
+  if (!started) {
+    scheduleWorkingReactionCleanup(channel, lastMsg.messageId, earlyReaction);
+    return;
+  }
+  taken.handedOver = true;
   const {
     sendOpts,
     separateFinalReply,
@@ -3283,7 +3317,14 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   // chat message list — useful when scrolling back, or for onlookers who
   // haven't opened the card. COT mode posts its own separate bubble, so it
   // stays excluded.
-  const reactionPromise = cotEnabled ? undefined : addWorkingReaction(channel, lastMsg.messageId);
+  let reactionPromise = earlyReaction;
+  if (cotEnabled && reactionPromise) {
+    // COT was switched on while the run was being prepared.
+    scheduleWorkingReactionCleanup(channel, lastMsg.messageId, reactionPromise);
+    reactionPromise = undefined;
+  } else if (!cotEnabled && !reactionPromise) {
+    reactionPromise = addWorkingReaction(channel, lastMsg.messageId);
+  }
 
   // Only the progress card can take over a topic's opener card; any other reply leaves it the notice it stands for.
   if (cotEnabled || replyMode !== 'card') await releaseTopicOpener(channel, scope);
