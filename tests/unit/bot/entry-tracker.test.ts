@@ -58,7 +58,7 @@ describe('entry tracker', () => {
     now += 60 * 60_000;
     expect((await t.lookup('ou_abc'))?.source).toBe('alice');
     expect(exec).toHaveBeenCalledTimes(3);
-    expect(exec.mock.calls[0][0]).toEqual(expect.arrayContaining(['apps', '+db-execute', '--app-id', 'app_x', '--as', 'user', '--yes']));
+    expect(exec.mock.calls[0]![0]).toEqual(expect.arrayContaining(['apps', '+db-execute', '--app-id', 'app_x', '--as', 'user', '--yes']));
   });
 
   it('tags a private turn: patches run-context and logs the turn', async () => {

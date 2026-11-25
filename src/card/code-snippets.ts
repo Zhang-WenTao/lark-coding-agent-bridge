@@ -66,7 +66,8 @@ export function codeBlockPost(code: string, lang = ''): object | null {
  * can carry just a key: putting the code itself on the button would double
  * the card's size against Feishu's 30 KB limit. Oldest entries go first once
  * the store holds {@link cap} of them; on disk so a restart keeps old cards
- * working.
+ * working. Cards no longer get these buttons (an answer with code goes out as
+ * a post, see answer-post.ts); the store serves the ones already sent.
  */
 export class CodeSnippetStore {
   private readonly snippets = new Map<string, string>();

@@ -5,7 +5,7 @@ import type { CommandContext } from '../types';
 import { commandReplyOptions, reply } from '../shared';
 
 /**
- * 「复制代码」 button on a finished card: send that code block alone as a
+ * 「复制代码」 button on an older finished card: send that code block alone as a
  * reply to the card. It goes out as a rich-text code block, whose copy icon
  * copies it whole (cards can't write the clipboard, and their own code blocks
  * have no copy icon); code that itself holds a ``` fence goes out as plain

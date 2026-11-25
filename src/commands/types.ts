@@ -79,7 +79,7 @@ export interface Controls {
   audit?: AuditLog;
   /** 会话智能压缩 closes the agent asked for, read by `/status`. Late-bound by startChannel. */
   pendingRotations?: Pick<PendingRotationStore, 'get'>;
-  /** Code blocks behind finished cards' 「复制代码」 buttons (see /copycode). */
+  /** Code blocks behind the 「复制代码」 buttons of older cards (see /copycode); new answers post their code. */
   codeSnippets?: Pick<CodeSnippetStore, 'get' | 'put'>;
   /** 指定模型: each topic's `/model` pin. Late-bound by startChannel. */
   modelPins?: ModelPinStore;
