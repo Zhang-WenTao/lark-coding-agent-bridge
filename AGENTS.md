@@ -6,16 +6,13 @@
 
 ## 仓库边界
 
-- 这是我们维护的 fork（`origin` = `git@github.com:Zhang-WenTao/lark-coding-agent-bridge.git`），按**上游优先**维护（boss 2026-11-25 定）。上游是部门共用的 `scwsl/lark-coding-agent-bridge`（主要维护者 shilong.wang），再往上是 `mirsery/…` ← `zarazhangrui/…`。文中的 boss 指本仓库的维护者。
-- 通用改动先提上游：
-  - 分支从上游 main 切，新行为做成配置开关，默认值保持上游现在的行为。
-  - 推到 origin，再给上游开 PR：`gh pr create -R scwsl/lark-coding-agent-bridge --base main --head Zhang-WenTao:<分支>`。
-  - 只属于本 fork 的东西不提上游：这几条约定、README 里的 fork 说明、release 配置。
-- fork 的 `main` 只是部署载体：等于上游 main 加上还没被上游合进去的补丁。
-  - 同步上游用一次性 fetch，不加 remote（`.claude/settings.json` 禁加）：`git fetch git@github.com:scwsl/lark-coding-agent-bridge.git main`。
-  - 把 `FETCH_HEAD` 合（merge）进 main，过门禁后推 origin。不 rebase，不 force push。
-  - 上游合了我们的 PR，下一次同步就吸收掉，fork 和上游的差异应该越来越小。清零后部署改跑上游，本仓库归档。
-  - 还在等上游合的 PR：`gh pr list -R scwsl/lark-coding-agent-bridge --author Zhang-WenTao`。
+- 这是我们自己维护的 fork，只有一个 remote：`origin` = `git@github.com:Zhang-WenTao/lark-coding-agent-bridge.git`。fork 的 `main` 就是主线，部署都从它构建（boss 2026-11-26 定，取代 11-25 的「上游优先」）。文中的 boss 指本仓库的维护者。
+- 上游链：`scwsl/lark-coding-agent-bridge`（部门共用的桥接，主要维护者 shilong.wang）← `mirsery/…` ← `zarazhangrui/…`。
+- 改动从 fork `main` 切分支，按下面的迭代流程过门禁后合回 `main`。按我们自己的需要设计，不用为了照顾上游做开关，也不用保留上游的默认行为。
+- **默认不跟上游**：不定期同步，我们自己迭代。发现上游有我们要用的改动时，再单独拉进来：
+  - 一次性 fetch，不加 remote（`.claude/settings.json` 禁加）：`git fetch git@github.com:scwsl/lark-coding-agent-bridge.git main`。
+  - 只挑需要的提交，`git cherry-pick -x <sha>`（留出处），在分支上过门禁后合回 `main`。冲突按本 fork 的行为解。不 rebase，不 force push。
+- 不往上游推分支、开 PR、提 issue；boss 明确要求时例外。
 - 默认分支 `main`。提交信息、代码注释、PR 描述里不出现任何 AI 工具署名（`Co-Authored-By: Claude …`、`Co-Authored-By: Codex …`、`Generated with …` 之类一律不加）。
 
 ## 本机运行形态（改动怎么生效）
