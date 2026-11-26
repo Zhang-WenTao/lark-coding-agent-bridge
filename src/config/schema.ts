@@ -301,6 +301,14 @@ export interface AppPreferences {
    */
   ownerNotifyChats?: string[];
   /**
+   * 自停线 for 按约定暂停的任务: when a resume the agent scheduled with
+   * `[[RESUME_AT…]]` / `[[RESUME_AFTER…]]` comes due while the 5-hour quota
+   * window is used above `fiveHourPercent`, the bridge postpones it to that
+   * window's reset instead of starting the agent. Config-file only. Off when
+   * absent. See {@link getSelfPauseFiveHourPercent}.
+   */
+  selfPause?: SelfPauseConfig;
+  /**
    * 过载保护: in these group chats, a batch made only of other bots' messages
    * is not answered while the agent account's quota is tight — the bot posts
    * an overload card instead and starts no run. Humans are always answered.
@@ -363,6 +371,11 @@ export interface AppPreferences {
   dreamAuto?: boolean;
   /** Limits behind {@link dream}; config-file only. See {@link getDream}. */
   dreamTuning?: DreamTuning;
+}
+
+export interface SelfPauseConfig {
+  /** 1–100: a scheduled resume waits while the 5-hour window is used above this. */
+  fiveHourPercent?: number;
 }
 
 export interface BotOverloadConfig {
@@ -912,6 +925,12 @@ export function getLongRunNoticeMs(cfg: AppConfig): number | undefined {
   if (raw === undefined) return DEFAULT_LONG_RUN_NOTICE_MINUTES * 60_000;
   if (typeof raw !== 'number' || !Number.isFinite(raw) || raw <= 0) return undefined;
   return Math.min(Math.max(Math.floor(raw), 1), 24 * 60) * 60_000;
+}
+
+/** The 自停线 (percent) a scheduled resume checks first, or `undefined` when off. See `selfPause`. */
+export function getSelfPauseFiveHourPercent(cfg: AppConfig): number | undefined {
+  const raw = cfg.preferences?.selfPause?.fiveHourPercent;
+  return typeof raw === 'number' && Number.isFinite(raw) && raw >= 1 && raw <= 100 ? raw : undefined;
 }
 
 /** Whether runs in `chatId` end with an @-the-owner brief. See `ownerNotifyChats`. */

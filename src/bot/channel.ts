@@ -61,6 +61,7 @@ import {
   getMaxConcurrentRuns,
   getMessageReplyMode,
   getLongRunNoticeMs,
+  getSelfPauseFiveHourPercent,
   isOwnerNotifyChat,
   getRunIdleTimeoutMs,
   getShowToolCalls,
@@ -155,7 +156,7 @@ import {
   resumeAtFor,
   type PendingResume,
 } from './auto-resume';
-import { decideScheduledResume, type ScheduledResumeDecision } from './scheduled-resume';
+import { decideScheduledResume, selfPauseDelay, type ScheduledResumeDecision } from './scheduled-resume';
 import { KickoffInbox, kickoffScope, type Kickoff } from './kickoff-inbox';
 import { CardPatchHealth, instrumentCardPatches } from './card-patch-health';
 import { processAgentStream } from './agent-stream';
@@ -234,7 +235,7 @@ import { mediaPlaceholders } from './media-placeholders';
 import { OWNER_BRIEF_INSTRUCTION, planOwnerNotice, stripBriefMarker } from '../card/owner-notify';
 import { FINAL_CARD_TITLE_INSTRUCTION } from '../card/title-marker';
 import { resumeRequestIn, scheduledResumeInstruction } from '../card/resume-marker';
-import { reportedFiveHourWindow } from '../agent/quota';
+import { readAgentQuota, reportedFiveHourWindow } from '../agent/quota';
 import { planLongRunNotice, sendLongRunNotice } from './long-run-notice';
 import {
   BackgroundOrigins,
@@ -730,6 +731,31 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
     if (!access.ok) {
       log.warn('auto-resume', 'access-denied', { scope: resume.scope, reason: access.reason });
       return;
+    }
+    // 自停线 (preferences.selfPause): a task the agent paused on purpose reads
+    // the quota before going on; past the line it waits for the window's reset.
+    const line = resume.kind === 'scheduled' ? getSelfPauseFiveHourPercent(controls.cfg) : undefined;
+    if (line !== undefined) {
+      const quotaDir = join(deps.appPaths?.profileDir ?? tmpdir(), 'quota-scratch');
+      mkdirSync(quotaDir, { recursive: true, mode: 0o700 });
+      const reading = await readAgentQuota(controls.profileConfig, {
+        cwd: quotaDir,
+        ...(deps.appPaths?.profileDir ? { profileDir: deps.appPaths.profileDir } : {}),
+      });
+      const wait = selfPauseDelay(reading, line, Date.now());
+      if (wait) {
+        await autoResumer.schedule({ ...resume, resumeAt: wait.until });
+        log.info('auto-resume', 'self-pause-postponed', { scope: resume.scope, usedPercent: wait.usedPercent, line });
+        const t = runStrings(resume.locale);
+        await channel
+          .send(
+            resume.chatId,
+            { markdown: t.selfPausePostponed(Math.round(wait.usedPercent), line, formatMoment(wait.until)) },
+            { replyTo: resume.originMessageId, ...(resume.chatType === 'topic' && resume.threadId ? { replyInThread: true } : {}) },
+          )
+          .catch((err) => log.warn('auto-resume', 'self-pause-notice-failed', { err: String(err) }));
+        return;
+      }
     }
     if (resume.cardMessageId && resume.card) {
       await channel

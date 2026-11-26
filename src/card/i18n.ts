@@ -101,6 +101,8 @@ export interface RunStrings {
   resumeRejectReasons: Record<ResumeRejectReason, string>;
   /** What a task the agent paused on purpose is told when its time comes. */
   scheduledResumePrompt(ledger: string | undefined): string;
+  /** Told in the chat when a scheduled resume waits for the 5-hour window (preferences.selfPause). */
+  selfPausePostponed(used: number, line: number, at: string): string;
 }
 
 const zh: RunStrings = {
@@ -190,6 +192,8 @@ const zh: RunStrings = {
       ? `请先读任务台账：${ledger}，再核对实际进度（有代码改动的看 git log），从台账的「下一步」继续；已经完成并提交的部分不要重做。`
       : '请从暂停的地方接着做，不要重复已经完成的步骤。') +
     '如果主人在这期间让你停下，或任务其实已经完成，简短说明即可。',
+  selfPausePostponed: (used, line, at) =>
+    `⏸ 到了约定的继续时间，但 5 小时额度已用 ${used}%（超过 ${line}% 的自停线），推迟到重置后的 **${at}** 再继续；发 \`/stop\` 可以取消。`,
 };
 
 const en: RunStrings = {
@@ -280,6 +284,8 @@ const en: RunStrings = {
       ? `Read the task ledger: ${ledger}, check the real progress (git log where code changed), and continue from its next step; do not redo work that is already done and committed. `
       : 'Continue from where you paused without repeating finished steps. ') +
     'If the owner told you to stop in the meantime, or the task is actually done, just say so briefly.',
+  selfPausePostponed: (used, line, at) =>
+    `⏸ Time to resume, but the 5-hour quota is ${used}% used (past the ${line}% self-pause line); postponed to **${at}**, after its reset. Send \`/stop\` to cancel.`,
 };
 
 const TABLE: Record<Locale, RunStrings> = { zh, en };

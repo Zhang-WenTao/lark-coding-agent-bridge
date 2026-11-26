@@ -15,8 +15,10 @@ import {
   SCHEDULED_RESUME_MIN_LEAD_MS,
   decideScheduledResume,
   parseResumeTime,
+  selfPauseDelay,
   type ScheduledResumeInput,
 } from '../../../src/bot/scheduled-resume.js';
+import { getSelfPauseFiveHourPercent, type AppConfig } from '../../../src/config/schema.js';
 import { findLedger } from '../../../src/bot/task-ledger.js';
 
 const dirs: string[] = [];
@@ -235,6 +237,48 @@ describe('scheduled resumes in the AutoResumer', () => {
     expect(describePendingResume(scheduled())).toContain('按约定暂停');
     expect(describePendingResume(scheduled({ kind: 'interrupted' }))).toContain('按任务台账自动继续');
     expect(describePendingResume(scheduled({ kind: undefined, limitType: 'five_hour' }))).toContain('5 小时额度用完暂停');
+  });
+});
+
+describe('the self-pause line (preferences.selfPause)', () => {
+  const reset = NOW + 2 * 60 * MIN;
+  const reading = (usedPercent: number, resets: string | null = new Date(reset).toISOString()) => ({
+    windows: [
+      { label: '5 小时窗口', usedPercent, ...(resets !== null ? { resets } : {}) },
+      { label: '本周', usedPercent: 20 },
+    ],
+  });
+
+  it('postpones a due resume to the reset while the 5-hour window is past the line', () => {
+    expect(selfPauseDelay(reading(63), 50, NOW)).toEqual({ usedPercent: 63, until: reset + SCHEDULED_RESUME_GRACE_MS });
+    // Claude's own wording of the reset works as well.
+    const claude = { windows: [{ label: '5 小时窗口', usedPercent: 80, resets: 'Nov 26, 3pm (UTC)' }] };
+    expect(selfPauseDelay(claude, 50, Date.UTC(2026, 10, 26, 13))).toEqual({
+      usedPercent: 80,
+      until: Date.UTC(2026, 10, 26, 15) + SCHEDULED_RESUME_GRACE_MS,
+    });
+  });
+
+  it('goes on at or under the line, and whenever the quota or its reset cannot be read', () => {
+    expect(selfPauseDelay(reading(50), 50, NOW)).toBeUndefined();
+    expect(selfPauseDelay(reading(12), 50, NOW)).toBeUndefined();
+    expect(selfPauseDelay(undefined, 50, NOW)).toBeUndefined();
+    expect(selfPauseDelay(reading(90, null), 50, NOW)).toBeUndefined();
+    expect(selfPauseDelay(reading(90, 'soon'), 50, NOW)).toBeUndefined();
+    expect(selfPauseDelay(reading(90, new Date(NOW - MIN).toISOString()), 50, NOW)).toBeUndefined();
+  });
+
+  it('counts a refused account as full', () => {
+    expect(selfPauseDelay({ ...reading(30), blocked: true }, 50, NOW)).toMatchObject({ usedPercent: 100 });
+  });
+
+  it('is off unless a line from 1 to 100 is configured', () => {
+    const cfg = (selfPause: unknown) => ({ preferences: { selfPause } }) as unknown as AppConfig;
+    expect(getSelfPauseFiveHourPercent(cfg({ fiveHourPercent: 50 }))).toBe(50);
+    expect(getSelfPauseFiveHourPercent(cfg(undefined))).toBeUndefined();
+    expect(getSelfPauseFiveHourPercent(cfg({ fiveHourPercent: 0 }))).toBeUndefined();
+    expect(getSelfPauseFiveHourPercent(cfg({ fiveHourPercent: 150 }))).toBeUndefined();
+    expect(getSelfPauseFiveHourPercent(cfg({ fiveHourPercent: '50' }))).toBeUndefined();
   });
 });
 

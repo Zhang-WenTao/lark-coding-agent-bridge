@@ -31,6 +31,23 @@ vi.mock('@larksuite/channel', async (importOriginal) => {
   return { ...actual, createLarkChannel: sdkMock.createLarkChannel };
 });
 
+// What `/usage` says when a scheduled resume checks the self-pause line; never spawns a CLI.
+const quotaMock = vi.hoisted(() => ({
+  reading: undefined as import('../../../src/agent/quota.js').QuotaReading | undefined,
+  calls: 0,
+}));
+
+vi.mock('../../../src/agent/quota.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../src/agent/quota.js')>();
+  return {
+    ...actual,
+    readAgentQuota: async () => {
+      quotaMock.calls++;
+      return quotaMock.reading;
+    },
+  };
+});
+
 import { startChannel } from '../../../src/bot/channel.js';
 
 type Mode = 'card' | 'markdown' | 'text' | 'final-card' | 'cot';
@@ -69,6 +86,8 @@ const MIN = 60_000;
 const cleanups: Array<() => Promise<void>> = [];
 
 afterEach(async () => {
+  quotaMock.reading = undefined;
+  quotaMock.calls = 0;
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
   sdkMock.channel = undefined;
@@ -219,6 +238,51 @@ describe('between the pause and the resume', () => {
   });
 });
 
+describe('with a self-pause line (preferences.selfPause)', () => {
+  it('reads the quota when due and, past the line, waits for the reset without starting the agent', async () => {
+    const at = futureClock(60 * MIN);
+    const profile = await createProfile();
+    const h = await startBridge(profile, {
+      preferences: { selfPause: { fiveHourPercent: 50 } },
+      events: [pausingRun(`[[RESUME_AT: ${at.text}]]`), answer('WENT_ON_AFTER_RESET')],
+    });
+    await h.channel.handlers.message?.(message('om_task', '额度过半就停', OWNER));
+    await waitFor(() => h.autoResumer().get('oc_dm') !== undefined);
+    expect(quotaMock.calls).toBe(0);
+
+    // Due, but the 5-hour window is at 63%: postponed to its reset, and the chat is told why.
+    const reset = at.ms + 90 * MIN;
+    quotaMock.reading = { windows: [{ label: '5 小时窗口', usedPercent: 63, resets: new Date(reset).toISOString() }] };
+    await h.autoResumer().tick(at.ms);
+    await waitFor(() => JSON.stringify(h.channel.sent).includes('自停线'));
+    expect(quotaMock.calls).toBe(1);
+    expect(h.agent.runOptions).toHaveLength(1);
+    const postponed = h.autoResumer().get('oc_dm');
+    expect(postponed).toMatchObject({ kind: 'scheduled', resumeAt: reset + SCHEDULED_RESUME_GRACE_MS, attempt: 1 });
+    expect(JSON.parse(await readFile(profile.autoResumeFile, 'utf8')).resumes.oc_dm.resumeAt).toBe(reset + SCHEDULED_RESUME_GRACE_MS);
+
+    // After the reset the window is fresh: the task goes on.
+    quotaMock.reading = { windows: [{ label: '5 小时窗口', usedPercent: 0 }] };
+    await h.autoResumer().tick(postponed!.resumeAt);
+    await waitFor(() => (h.channel.streams[1]?.renders.at(-1) ?? '').includes('WENT_ON_AFTER_RESET'));
+    expect(h.agent.runOptions[1]?.prompt).toContain('[自动继续]');
+  });
+
+  it('goes on when the quota cannot be read', async () => {
+    const at = futureClock(60 * MIN);
+    const profile = await createProfile();
+    const h = await startBridge(profile, {
+      preferences: { selfPause: { fiveHourPercent: 50 } },
+      events: [pausingRun(`[[RESUME_AT: ${at.text}]]`), answer('WENT_ON_UNREAD')],
+    });
+    await h.channel.handlers.message?.(message('om_task', '额度过半就停', OWNER));
+    await waitFor(() => h.autoResumer().get('oc_dm') !== undefined);
+    await h.autoResumer().tick(at.ms);
+    await waitFor(() => (h.channel.streams[1]?.renders.at(-1) ?? '').includes('WENT_ON_UNREAD'));
+    expect(quotaMock.calls).toBe(1);
+  });
+});
+
 describe('gates', () => {
   it("never schedules from someone else's run, and still hides the marker", async () => {
     const profile = await createProfile({ fiveHourReset: Date.now() + 40 * MIN });
@@ -306,7 +370,10 @@ async function createProfile(opts: { fiveHourReset?: number } = {}): Promise<Pro
   };
 }
 
-async function startBridge(profile: Profile, opts: { events: FakeAgentEvents; mode?: Mode }) {
+async function startBridge(
+  profile: Profile,
+  opts: { events: FakeAgentEvents; mode?: Mode; preferences?: Record<string, unknown> },
+) {
   const mode = opts.mode ?? 'card';
   const base = createDefaultProfileConfig({
     agentKind: 'claude',
@@ -316,6 +383,7 @@ async function startBridge(profile: Profile, opts: { events: FakeAgentEvents; mo
       messageReply: mode === 'cot' ? 'markdown' : mode,
       messageReplyMigrated: true,
       ...(mode === 'cot' ? { cotMessages: 'brief' as const } : {}),
+      ...opts.preferences,
     },
   });
   const profileConfig = { ...base, workspaces: { ...base.workspaces, default: profile.workspace } };

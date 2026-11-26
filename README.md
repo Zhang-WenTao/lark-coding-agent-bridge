@@ -572,6 +572,8 @@ In three cases the bridge later picks a task up again by itself: at the set time
   - One agreement per conversation; a new marker replaces the old one.
   - An unrelated owner message in the same conversation leaves the agreement in place — the turn finishing does not drop it, and that turn's agent is told about it, so it writes `[[RESUME_CANCEL]]` when the owner says to hold off. `/stop` cancels it directly, along with any turn still running.
 
+  **Self-pause line** (optional): the profile's `preferences.selfPause.fiveHourPercent` (e.g. `50`), config-file only (restart the profile after changing it). With it set, when the agreed time comes the bridge reads the quota first (Claude: `claude -p /usage`, no model turn): if the 5-hour window is used above the line, the agent is not started; the resume moves to about 1.5 minutes after that window resets, and the chat is told why. When the quota or its reset cannot be read, the task goes on. It applies only to tasks paused on purpose, not to quota or interruption resumes.
+
 ## lark-cli identity policy
 
 Each profile uses a profile-local lark-cli directory at `~/.lark-channel/profiles/<profile>/lark-cli`. The agent process receives `LARKSUITE_CLI_CONFIG_DIR` for that directory, so personal authorization in one profile is not shared with another profile.

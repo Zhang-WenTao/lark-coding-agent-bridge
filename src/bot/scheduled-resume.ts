@@ -1,3 +1,4 @@
+import { quotaResetAt, type QuotaReading } from '../agent/quota';
 import type { ResumeNote, ResumeRejectReason, ResumeRequest } from '../card/resume-marker';
 import { MAX_AUTO_RESUMES, type PendingResume } from './auto-resume';
 
@@ -119,4 +120,30 @@ export function parseResumeTime(text: string, now: number): number | undefined {
     .replace(/([+-]\d{2})(\d{2})$/, '$1:$2');
   const at = Date.parse(iso);
   return Number.isFinite(at) ? at : undefined;
+}
+
+/** How the quota readers label the 5-hour window (Claude `/usage`, Codex rate limits). */
+const FIVE_HOUR_LABEL = '5 小时窗口';
+
+/**
+ * 自停线 (`preferences.selfPause.fiveHourPercent`): a scheduled resume that
+ * comes due while the 5-hour window is used above `line` waits for that
+ * window's reset instead of starting the agent — the owner's "only while it is
+ * at most half used" holds at resume time too. Undefined (go on now) when the
+ * window is at or under the line, or the reading or its reset is unknown: an
+ * unreadable quota never holds a task back. After the reset the window starts
+ * empty, so a postponed resume does not wait twice.
+ */
+export function selfPauseDelay(
+  reading: QuotaReading | undefined,
+  line: number,
+  now: number,
+): { usedPercent: number; until: number } | undefined {
+  const window = reading?.windows.find((w) => w.label === FIVE_HOUR_LABEL);
+  if (!window) return undefined;
+  const usedPercent = reading?.blocked ? 100 : window.usedPercent;
+  if (usedPercent <= line) return undefined;
+  const reset = quotaResetAt(window.resets, now);
+  if (reset === undefined || reset <= now) return undefined;
+  return { usedPercent, until: reset + SCHEDULED_RESUME_GRACE_MS };
 }
