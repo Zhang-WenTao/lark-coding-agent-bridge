@@ -29,13 +29,22 @@ export function autoResumePrompt(limitType: string | undefined, locale?: Locale)
   return runStrings(locale).autoResumePrompt(cardLimitLabel(limitType, locale));
 }
 
-/** The prompt for any pending resume, quota or interruption alike. */
+/** The prompt for any pending resume: quota, interruption or the agent's own plan. */
 export function resumePromptFor(resume: PendingResume): string {
+  const t = runStrings(resume.locale);
+  if (resume.kind === 'scheduled') return t.scheduledResumePrompt(resume.ledger);
   if (resume.kind === 'interrupted' && resume.ledger) {
-    const t = runStrings(resume.locale);
     return t.interruptedResumePrompt(t.interruptReasons[resume.reason ?? 'killed'], resume.ledger);
   }
   return autoResumePrompt(resume.limitType, resume.locale);
+}
+
+/** `/status`: why the task waits and when it goes on. */
+export function describePendingResume(resume: PendingResume): string {
+  const at = formatMoment(resume.resumeAt);
+  if (resume.kind === 'scheduled') return `按约定暂停，${at} 自动继续（发 /stop 取消）`;
+  if (resume.kind === 'interrupted') return `任务意外中断，${at} 按任务台账自动继续（发 /stop 取消）`;
+  return `${limitLabel(resume.limitType)}用完暂停，${at} 自动继续（发 /stop 取消）`;
 }
 
 /** One run waiting for its quota to reset. Persisted, so it survives restarts. */
@@ -59,9 +68,12 @@ export interface PendingResume {
   /**
    * `quota` (default): the plan's quota ran out. `interrupted`: the run was
    * killed or the bridge went down; it resumes from its task ledger.
+   * `scheduled`: the agent paused the owner's task on purpose with a
+   * `[[RESUME_…]]` marker (see scheduled-resume.ts); a run finishing in
+   * between does not drop it — only `/stop` or `[[RESUME_CANCEL]]` does.
    */
-  kind?: 'quota' | 'interrupted';
-  /** The task ledger to resume from (`interrupted` only). */
+  kind?: 'quota' | 'interrupted' | 'scheduled';
+  /** The task ledger to resume from (`interrupted`; `scheduled` when the agent named one). */
   ledger?: string;
   /** What interrupted it, for the resume prompt. */
   reason?: 'killed' | 'restart' | 'shutdown';

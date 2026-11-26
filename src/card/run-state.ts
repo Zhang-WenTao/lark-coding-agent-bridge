@@ -1,6 +1,7 @@
 import type { AgentEvent } from '../agent/types';
 import { stripBriefMarker } from '../session/brief-marker';
 import { stripNewSessionMarker } from '../session/smart-session';
+import { stripResumeMarkers, type ResumeNote } from './resume-marker';
 import { stripTitleMarker, titleOf } from './title-marker';
 
 export type ToolStatus = 'running' | 'done' | 'error';
@@ -72,6 +73,12 @@ export interface RunState {
    * Only the final card shows it.
    */
   title?: string;
+  /**
+   * What became of a `[[RESUME_…]]` line the agent ended the run with (see
+   * card/resume-marker): set by the bridge on the finished state, shown as a
+   * line under the answer in every reply mode.
+   */
+  resume?: ResumeNote;
 }
 
 export const initialState: RunState = {
@@ -328,17 +335,19 @@ export function stripNoReply(state: RunState): RunState {
 }
 
 /**
- * Drop a trailing `[[NEW_SESSION…]]` marker (会话智能压缩), `[[BRIEF…]]` and
- * `[[TITLE…]]` from the answer the user sees — complete, or still streaming in
- * on a live text block. The session request and the brief are read from the
- * raw state by the channel; the title is kept on the state (`title`).
+ * Drop a trailing `[[NEW_SESSION…]]` marker (会话智能压缩), `[[BRIEF…]]`,
+ * `[[TITLE…]]` and `[[RESUME_…]]` lines from the answer the user sees —
+ * complete, or still streaming in on a live text block. The session request,
+ * the brief and the resume request are read from the raw state by the
+ * channel; the title is kept on the state (`title`).
  */
 export function stripSessionMarker(state: RunState): RunState {
   let changed = false;
   let title: string | undefined;
   const strip = (text: string, streaming = false): string => {
     title = titleOf(text) ?? title;
-    return stripNewSessionMarker(stripTitleMarker(stripBriefMarker(text, streaming), streaming), streaming);
+    const markersOff = stripBriefMarker(stripResumeMarkers(text, streaming), streaming);
+    return stripNewSessionMarker(stripTitleMarker(markersOff, streaming), streaming);
   };
   const blocks = state.blocks.map((b) => {
     if (b.kind !== 'text') return b;
@@ -358,7 +367,7 @@ export function stripSessionMarker(state: RunState): RunState {
   };
 }
 
-/** Agent-side reply markers: `[[NO_REPLY]]` answers, `[[BRIEF…]]`, `[[TITLE…]]` and a trailing `[[NEW_SESSION…]]`. */
+/** Agent-side reply markers: `[[NO_REPLY]]` answers, `[[BRIEF…]]`, `[[TITLE…]]`, `[[RESUME_…]]` and a trailing `[[NEW_SESSION…]]`. */
 export function stripControlMarkers(state: RunState): RunState {
   return stripNoReply(stripSessionMarker(state));
 }

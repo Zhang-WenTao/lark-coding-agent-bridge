@@ -1,3 +1,5 @@
+import type { ResumeRejectReason } from './resume-marker';
+
 /**
  * Language of the bridge's own words on a run's reply (footer, buttons,
  * notices). Follows the rule the agent is given for its answers: Chinese by
@@ -92,6 +94,13 @@ export interface RunStrings {
   interruptedResumePrompt(reason: string, ledger: string): string;
   /** Told in the chat right after a run with a ledger died. */
   interruptedWillResume(reason: string, at: string): string;
+  /** Under an answer whose `[[RESUME_…]]` marker was registered (see card/resume-marker). */
+  resumeScheduled(at: string, ledger: boolean, clamped: boolean): string;
+  resumeCancelled(at: string): string;
+  resumeRejected(reason: string): string;
+  resumeRejectReasons: Record<ResumeRejectReason, string>;
+  /** What a task the agent paused on purpose is told when its time comes. */
+  scheduledResumePrompt(ledger: string | undefined): string;
 }
 
 const zh: RunStrings = {
@@ -161,6 +170,26 @@ const zh: RunStrings = {
     '从台账的「下一步」继续；已经完成并提交的部分不要重做。',
   interruptedWillResume: (reason, at) =>
     `⏯ 任务意外中断（${reason}）。将在 **${at}** 按任务台账自动继续，届时新开一张卡片接着做；发 \`/stop\` 可以取消。`,
+  resumeScheduled: (at, ledger, clamped) =>
+    `⏰ 将在 **${at}** 自动继续${ledger ? '，按任务台账接着做' : ''}${clamped ? '（最早只能约在 5 分钟后）' : ''}；发 \`/stop\` 可以取消。`,
+  resumeCancelled: (at) => `⏹ 已取消原定 ${at} 的自动继续。`,
+  resumeRejected: (reason) => `⚠️ 没有约定自动继续：${reason}。`,
+  resumeRejectReasons: {
+    'not-owner': '只有主人发起的任务可以约定自动继续',
+    'bad-time': '时间格式不对（写 2026-11-26T18:00 或 18:00）',
+    past: '约定的时间已经过了',
+    'too-far': '只能约在 24 小时以内',
+    'bad-window': '只支持 five_hour（当前 5 小时额度窗口）',
+    'no-reset': '读不到当前 5 小时额度窗口的重置时间',
+    'bad-ledger': '任务台账要写绝对路径',
+    'too-many': '连续自动继续的次数已到上限，需要主人发消息接着做',
+  },
+  scheduledResumePrompt: (ledger) =>
+    '[自动继续] 到了你上一轮约定的继续时间。' +
+    (ledger
+      ? `请先读任务台账：${ledger}，再核对实际进度（有代码改动的看 git log），从台账的「下一步」继续；已经完成并提交的部分不要重做。`
+      : '请从暂停的地方接着做，不要重复已经完成的步骤。') +
+    '如果主人在这期间让你停下，或任务其实已经完成，简短说明即可。',
 };
 
 const en: RunStrings = {
@@ -231,6 +260,26 @@ const en: RunStrings = {
     'with git log, and continue from its next step; do not redo work that is already done and committed.',
   interruptedWillResume: (reason, at) =>
     `⏯ The task was interrupted (${reason}). It will resume from its task ledger at **${at}** in a new card; send \`/stop\` to cancel.`,
+  resumeScheduled: (at, ledger, clamped) =>
+    `⏰ Will resume automatically at **${at}**${ledger ? ' from the task ledger' : ''}${clamped ? ' (5 minutes from now is the earliest)' : ''}; send \`/stop\` to cancel.`,
+  resumeCancelled: (at) => `⏹ Cancelled the automatic resume set for ${at}.`,
+  resumeRejected: (reason) => `⚠️ No automatic resume was set: ${reason}.`,
+  resumeRejectReasons: {
+    'not-owner': "only the bot owner's tasks can schedule one",
+    'bad-time': 'the time could not be read (write 2026-11-26T18:00 or 18:00)',
+    past: 'that time has already passed',
+    'too-far': 'it must be within 24 hours',
+    'bad-window': 'only five_hour (the current 5-hour quota window) is supported',
+    'no-reset': "the current 5-hour window's reset time is unknown",
+    'bad-ledger': 'the task ledger must be an absolute path',
+    'too-many': 'the limit of consecutive automatic resumes was reached; the owner has to continue it',
+  },
+  scheduledResumePrompt: (ledger) =>
+    '[auto-resume] The time you set in the previous turn to continue has come. ' +
+    (ledger
+      ? `Read the task ledger: ${ledger}, check the real progress (git log where code changed), and continue from its next step; do not redo work that is already done and committed. `
+      : 'Continue from where you paused without repeating finished steps. ') +
+    'If the owner told you to stop in the meantime, or the task is actually done, just say so briefly.',
 };
 
 const TABLE: Record<Locale, RunStrings> = { zh, en };

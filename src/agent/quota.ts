@@ -50,6 +50,45 @@ export async function accountRoomUnderCap(
   }
 }
 
+/** A quota window as a run reported it: used percent, and its reset as epoch ms when known. */
+export interface ReportedWindow {
+  usedPercent: number;
+  resetsAt?: number;
+}
+
+const FIVE_HOUR_REPORTS: Partial<Record<AgentKind, (profileDir: string) => ReportedWindow | undefined>> = {
+  // Every run records its account's windows (`rate_limit_event`); the account
+  // that reported last is the one the latest run used.
+  claude: (profileDir) => {
+    const latest = claudeAccountPool(profileDir)
+      .status()
+      .filter((entry) => entry.state?.windows.five_hour)
+      .sort((a, b) => (b.state?.updatedAt ?? 0) - (a.state?.updatedAt ?? 0))[0];
+    const window = latest?.state?.windows.five_hour;
+    return window
+      ? { usedPercent: window.usedPercent, ...(window.resetsAt !== undefined ? { resetsAt: window.resetsAt } : {}) }
+      : undefined;
+  },
+};
+
+/**
+ * The 5-hour window of the account the latest run used, as that run reported
+ * it — the bridge's own record, no CLI call, so it is synchronous. Undefined
+ * when the agent keeps no such record or nothing was reported. Never throws.
+ */
+export function reportedFiveHourWindow(
+  profileConfig: Pick<ProfileConfig, 'agentKind'>,
+  profileDir: string | undefined,
+): ReportedWindow | undefined {
+  const read = FIVE_HOUR_REPORTS[profileConfig.agentKind];
+  if (!read || !profileDir) return undefined;
+  try {
+    return read(profileDir);
+  } catch {
+    return undefined;
+  }
+}
+
 /** Undefined when the CLI cannot say — callers must treat that as "unknown", never as 0%. Never throws. */
 export async function readAgentQuota(profileConfig: ProfileConfig, opts: QuotaReadOptions): Promise<QuotaReading | undefined> {
   try {

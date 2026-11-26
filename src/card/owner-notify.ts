@@ -1,6 +1,7 @@
 import type { MentionInfo } from '@larksuite/channel';
 import type { Terminal } from './run-state';
 import { briefOf, clipBrief as clip, stripBriefMarker } from '../session/brief-marker';
+import { stripResumeMarkers } from './resume-marker';
 import { stripTitleMarker } from './title-marker';
 import type { LongRunRequester } from '../bot/long-run-notice';
 
@@ -21,7 +22,7 @@ export { briefOf, stripBriefMarker };
 /** First meaningful line of an answer, markdown stripped — the fallback brief. */
 export function fallbackBrief(text: string | undefined): string | undefined {
   if (!text) return undefined;
-  for (const raw of stripTitleMarker(stripBriefMarker(text)).split('\n')) {
+  for (const raw of stripTitleMarker(stripBriefMarker(stripResumeMarkers(text))).split('\n')) {
     const line = raw
       .replace(/^\s*(?:#{1,6}\s+|[-*+]\s+|\d+[.)]\s+|>\s*)/, '')
       .replace(/<[^>]+>/g, '')

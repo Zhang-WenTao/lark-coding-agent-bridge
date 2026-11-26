@@ -2,6 +2,7 @@ import type { AgentEvent } from '../agent/types';
 import type { CotMessagesMode, TenantBrand } from '../config/schema';
 import { log } from '../core/logger';
 import { toolHeaderText } from '../card/tool-render';
+import { stripResumeMarkers } from '../card/resume-marker';
 import type { RunState } from '../card/run-state';
 
 const ENDPOINTS: Record<TenantBrand, string> = {
@@ -333,6 +334,9 @@ export async function consumeCotEvents(
         continue;
       }
       if (evt.type === 'text') {
+        // `[[RESUME_…]]` lines are for the bridge (Claude sends whole text blocks, so they arrive in one piece).
+        const delta = stripResumeMarkers(evt.delta);
+        if (delta !== evt.delta && !delta.trim()) continue;
         closeReasoningIfNeeded();
         if (!textStepOpen) {
           textStepOpen = true;
@@ -348,7 +352,7 @@ export async function consumeCotEvents(
         }
         publisher.enqueue('TEXT_MESSAGE_CONTENT', {
           messageId: textMessageId,
-          delta: truncateCot(evt.delta, COT_TEXT_MAX),
+          delta: truncateCot(delta, COT_TEXT_MAX),
         });
         continue;
       }

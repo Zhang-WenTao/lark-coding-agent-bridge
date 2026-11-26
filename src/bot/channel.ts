@@ -145,7 +145,7 @@ import {
 import type { SessionStore } from '../session/store';
 import type { WorkspaceStore } from '../workspace/store';
 import { ActiveRuns } from '../runtime/active-runs';
-import { INTERRUPT_RESUME_DELAY_MS, MAX_INTERRUPT_RESUMES, isKilledExit, stripLedgerLines } from './task-ledger';
+import { INTERRUPT_RESUME_DELAY_MS, MAX_INTERRUPT_RESUMES, findLedger, isKilledExit, stripLedgerLines } from './task-ledger';
 import type { RunRecord } from '../runtime/run-registry';
 import {
   AutoResumer,
@@ -155,6 +155,7 @@ import {
   resumeAtFor,
   type PendingResume,
 } from './auto-resume';
+import { decideScheduledResume, type ScheduledResumeDecision } from './scheduled-resume';
 import { KickoffInbox, kickoffScope, type Kickoff } from './kickoff-inbox';
 import { CardPatchHealth, instrumentCardPatches } from './card-patch-health';
 import { processAgentStream } from './agent-stream';
@@ -232,6 +233,8 @@ import {
 import { mediaPlaceholders } from './media-placeholders';
 import { OWNER_BRIEF_INSTRUCTION, planOwnerNotice, stripBriefMarker } from '../card/owner-notify';
 import { FINAL_CARD_TITLE_INSTRUCTION } from '../card/title-marker';
+import { resumeRequestIn, scheduledResumeInstruction } from '../card/resume-marker';
+import { reportedFiveHourWindow } from '../agent/quota';
 import { planLongRunNotice, sendLongRunNotice } from './long-run-notice';
 import {
   BackgroundOrigins,
@@ -2166,6 +2169,8 @@ async function prepareBatchPrompt(
     ...(controls.botOwnerId && isOwnerNotifyChat(controls.cfg, chatId) ? [OWNER_BRIEF_INSTRUCTION] : []),
     // The final card's header bar shows only a title the agent gives (see card/title-marker).
     ...(getMessageReplyMode(controls.cfg) === 'final-card' ? [FINAL_CARD_TITLE_INSTRUCTION] : []),
+    // 按约定暂停: the owner's tasks may be paused on purpose and picked up later (bot/scheduled-resume).
+    ...(ownerRun && deps.autoResumer ? [scheduledResumeInstruction(scheduledPending(deps.autoResumer, scope))] : []),
     ...(editedIds.length > 0 ? [editInstruction(editedIds)] : []),
     ...(waitingOrigins.length > 0
       ? [backgroundTasksInstruction(waitingOrigins, executor.backgroundTasks(scope))]
@@ -2366,12 +2371,16 @@ async function submitBatchRun(
         agent: capability.agentId,
       }
     : undefined;
+  // An auto-resume (quota, interruption, the agent's own plan) carries on a
+  // task in the conversation it was paused in.
+  const resumedRun = batch.some((m) => m.rawContentType === AUTO_RESUME_CONTENT_TYPE);
   // 会话智能压缩: an agent-requested close is consumed by this message either
   // way. Never rotate under a process this scope still keeps (its background
-  // work would be cut off — and a fresh submit would reuse it anyway) or when
-  // the user quotes an earlier message, which points back into the old context.
+  // work would be cut off — and a fresh submit would reuse it anyway), when
+  // the user quotes an earlier message, which points back into the old
+  // context, or for an auto-resume, which goes on with the task in it.
   const pendingRotation = pendingRotations.take(scope);
-  const rotationBlocked = executor.hasLiveProcess(scope) || quotes.length > 0;
+  const rotationBlocked = executor.hasLiveProcess(scope) || quotes.length > 0 || resumedRun;
   // 长任务完成提醒 measures from here: queueing behind the concurrency cap is
   // waiting the requester does too.
   // Who started this turn and from where, for scripts the agent runs (the
@@ -2589,7 +2598,6 @@ async function submitBatchRun(
   // A task the plan quota stops is resumed by the bridge once the quota resets
   // (see AutoResumer) — unless resuming already failed MAX_AUTO_RESUMES times
   // in a row. The paused card says which of the two will happen.
-  const resumedRun = batch.some((m) => m.rawContentType === AUTO_RESUME_CONTENT_TYPE);
   const resumeAttempt = autoResumer?.nextAttempt(scope, resumedRun) ?? 1;
   const canAutoResume = Boolean(autoResumer) && resumeAttempt <= MAX_AUTO_RESUMES;
   const withAutoResume = (state: RunState): RunState =>
@@ -2599,6 +2607,62 @@ async function submitBatchRun(
   // The bridge's own words on the reply follow the caller's language, the
   // same rule the agent gets for its answer (see detectLocale).
   const locale = detectLocale(batch.map((m) => m.content));
+  // 按约定暂停: a `[[RESUME_…]]` line in the answer (bot/scheduled-resume).
+  // Decided once, on the run's finished state, so the note on the reply and
+  // what the run registers when it is over are the same decision.
+  const resumedFrom = batch.find((m) => m.rawContentType === AUTO_RESUME_CONTENT_TYPE);
+  const decideResume = (raw: RunState): ScheduledResumeDecision | undefined => {
+    const request = resumeRequestIn(raw);
+    if (!request || !autoResumer) return undefined;
+    // The ledger this run announced, else the one the resume that started it named.
+    const ledgerFallback = handle.ledger ?? findLedger(resumedFrom?.content ?? '');
+    const pending = autoResumer.get(scope);
+    return decideScheduledResume({
+      request,
+      now: Date.now(),
+      ownerRun,
+      attempt: resumeAttempt,
+      fiveHourResetAt: () => reportedFiveHourWindow(controls.profileConfig, deps.profileDir)?.resetsAt,
+      ...(ledgerFallback ? { ledgerFallback } : {}),
+      ...(pending ? { pending } : {}),
+    });
+  };
+  let runResume: { decision: ScheduledResumeDecision | undefined } | undefined;
+  const runResumeDecision = (raw: RunState | undefined): ScheduledResumeDecision | undefined => {
+    if (raw?.terminal !== 'done') return undefined;
+    runResume ??= { decision: decideResume(raw) };
+    return runResume.decision;
+  };
+  /** The run's finished state with what became of its marker, for every reply mode to show. */
+  const withResume = (state: RunState): RunState => {
+    const note = runResumeDecision(state)?.note;
+    return note ? { ...state, resume: note } : state;
+  };
+  const applyResume = (decision: ScheduledResumeDecision | undefined, via: 'run' | 'background-turn'): void => {
+    if (!decision || !autoResumer) return;
+    if (decision.action === 'reject') {
+      log.info('auto-resume', 'scheduled-rejected', { scope, reason: decision.reason, via });
+    } else if (decision.action === 'cancel') {
+      void autoResumer.cancel(scope, 'agent-cancel');
+    } else {
+      void autoResumer.schedule({
+        scope,
+        chatId,
+        chatType: resumeChatType(lastMsg, mode),
+        ...(threadId ? { threadId } : {}),
+        senderId: lastMsg.senderId,
+        ...(lastMsg.senderName ? { senderName: lastMsg.senderName } : {}),
+        // The resumed run replies under the same question, as a paused one does.
+        originMessageId: lastMsg.messageId,
+        resumeAt: decision.at,
+        locale,
+        kind: 'scheduled',
+        ...(decision.ledger ? { ledger: decision.ledger } : {}),
+        attempt: resumeAttempt,
+        createdAt: Date.now(),
+      });
+    }
+  };
   const filterForPrefs = (raw: RunState): RunState => {
     run.lastRawState = raw;
     // Group members can't open the owner's ledger path: hide the line there.
@@ -2673,7 +2737,11 @@ async function submitBatchRun(
   // Turns the agent runs on its own after this reply (a background task it
   // started reported back) go out as a follow-up reply to the same message.
   run.deliverBackgroundTurn = async (turn) => {
-    const state = backgroundTurnState(turn, filterForPrefs, {
+    // A `[[RESUME_…]]` line in a turn the agent ran on its own is decided on that turn.
+    const turnResume =
+      turn.kind === 'turn' ? decideResume(finalizeIfRunning(turn.events.reduce(reduce, initialState))) : undefined;
+    const turnNote = turnResume?.note;
+    const state = backgroundTurnState(turn, turnNote ? (s) => filterForPrefs({ ...s, resume: turnNote }) : filterForPrefs, {
       finalAnswerOnly: !separateFinalReply && answerOnlyReply(replyMode, controls.cfg),
     });
     if (state) {
@@ -2694,6 +2762,7 @@ async function submitBatchRun(
         finalCard: getFinalCardPreference(controls.cfg),
       });
     }
+    applyResume(turnResume, 'background-turn');
     // 会话智能压缩: the turn that ends the background work may close the
     // conversation — the run's own answer could not while work was pending.
     if (smartSession && turn.kind === 'turn' && turn.background === 0) {
@@ -2739,6 +2808,9 @@ async function submitBatchRun(
     canAutoResume,
     locale,
     filterForPrefs,
+    withResume,
+    runResumeDecision,
+    applyResume,
     cardRenderOptions,
     here,
     settleWaiting,
@@ -2767,6 +2839,7 @@ async function deliverRunReply(
     | 'supplementTarget'
     | 'locale'
     | 'filterForPrefs'
+    | 'withResume'
     | 'cardRenderOptions'
   >,
 ): Promise<void> {
@@ -2788,6 +2861,7 @@ async function deliverRunReply(
     supplementTarget,
     locale,
     filterForPrefs,
+    withResume,
     cardRenderOptions,
   } = input;
   if (cotEnabled) {
@@ -2808,13 +2882,8 @@ async function deliverRunReply(
       const cotDone = consumeCotEvents(execution.subscribe(), cotPublisher, {
         detail: cotMessages,
       });
-      const finalState = await processAgentStream(
-        handle,
-        eventStream,
-        scope,
-        idleTimeoutMs,
-        recordSession,
-        async () => {},
+      const finalState = withResume(
+        await processAgentStream(handle, eventStream, scope, idleTimeoutMs, recordSession, async () => {}),
       );
       await cotDone;
       run.runTerminal = finalState.terminal;
@@ -2911,13 +2980,13 @@ async function deliverRunReply(
       idleTimeoutMs,
       recordSession,
       async (state) => {
-        latestState = state;
-        if (shouldOpenProgressStream(filterForPrefs(state))) progress.ensureOpen();
+        latestState = withResume(state);
+        if (shouldOpenProgressStream(filterForPrefs(latestState))) progress.ensureOpen();
         if (cardCtrl) {
-          await cardCtrl.update(renderLiveCard(state));
+          await cardCtrl.update(renderLiveCard(latestState));
         }
       },
-    );
+    ).then(withResume);
     if (opensProgressEagerly(separateFinalReply)) progress.ensureOpen();
     // Keep the clock ticking while the agent is quiet. Only touches a card
     // that is still running, so it can never overwrite the final one.
@@ -3084,13 +3153,13 @@ async function deliverRunReply(
       idleTimeoutMs,
       recordSession,
       async (state) => {
-        latestState = state;
-        if (shouldOpenProgressStream(filterForPrefs(state))) progress.ensureOpen();
+        latestState = withResume(state);
+        if (shouldOpenProgressStream(filterForPrefs(latestState))) progress.ensureOpen();
         if (markdownCtrl) {
-          await markdownCtrl.setContent(renderText(filterForPrefs(state), locale));
+          await markdownCtrl.setContent(renderText(filterForPrefs(latestState), locale));
         }
       },
-    );
+    ).then(withResume);
     if (opensProgressEagerly(separateFinalReply)) progress.ensureOpen();
     try {
       await awaitRenderAwareStream({
@@ -3139,13 +3208,8 @@ async function deliverRunReply(
     // text / final-card mode: drain the agent stream without sending anything
     // during the run, then post the answer once — as a plain markdown
     // (msg_type=post) message, or as one clean card. No streaming either way.
-    const finalState = await processAgentStream(
-      handle,
-      eventStream,
-      scope,
-      idleTimeoutMs,
-      recordSession,
-      async () => {},
+    const finalState = withResume(
+      await processAgentStream(handle, eventStream, scope, idleTimeoutMs, recordSession, async () => {}),
     );
     run.answerIsNewMessage = true;
     // Only the answer the run ends on goes out (`final-card`, or text with
@@ -3265,6 +3329,9 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     canAutoResume,
     locale,
     filterForPrefs,
+    withResume,
+    runResumeDecision,
+    applyResume,
     cardRenderOptions,
     here,
     settleWaiting,
@@ -3300,6 +3367,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       supplementTarget,
       locale,
       filterForPrefs,
+      withResume,
       cardRenderOptions,
     });
   } catch (err) {
@@ -3356,11 +3424,16 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         });
       } else if (run.runTerminal === 'paused') {
         log.warn('auto-resume', 'gave-up', { scope, attempts: resumeAttempt - 1 });
-      } else if (run.runTerminal === 'done') {
+      } else if (run.runTerminal === 'done' && autoResumer.get(scope)?.kind !== 'scheduled') {
         // A run that got through means the quota is back and someone is
         // steering this chat again; resuming on top of that would repeat work.
+        // A resume the agent scheduled is a plan for later, not a stalled
+        // task: a message in between leaves it be (`/stop` and
+        // `[[RESUME_CANCEL]]` drop it).
         void autoResumer.cancel(scope, 'run-completed');
       }
+      // 按约定暂停: the marker this run ended with, as its reply already said.
+      if (run.runTerminal === 'done') applyResume(runResumeDecision(run.lastRawState), 'run');
       // Killed from outside (or cut by a shutdown) halfway through a task that
       // keeps a ledger: pick it up again from the ledger, the owner's only.
       const killed = run.runTerminal === 'error' && isKilledExit(run.runError);
@@ -3438,6 +3511,13 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
 function ownerNotifyTarget(controls: Controls, chatId: string): string | undefined {
   const ownerId = controls.botOwnerId;
   return ownerId && isOwnerNotifyChat(controls.cfg, chatId) ? ownerId : undefined;
+}
+
+/** The resume the agent scheduled in `scope` (`[[RESUME_…]]`), for its next run to know about. */
+function scheduledPending(autoResumer: AutoResumer, scope: string): { at: number; ledger?: string } | undefined {
+  const pending = autoResumer.get(scope);
+  if (pending?.kind !== 'scheduled') return undefined;
+  return { at: pending.resumeAt, ...(pending.ledger ? { ledger: pending.ledger } : {}) };
 }
 
 /** Chat type for access checks on resume — the same rule intake applies. */

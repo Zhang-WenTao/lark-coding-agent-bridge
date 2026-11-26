@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import type { NormalizedMessage } from '@larksuite/channel';
 import { ActiveRuns } from '../../../src/runtime/active-runs.js';
+import { AutoResumer, type PendingResume } from '../../../src/bot/auto-resume.js';
 import { tryHandleCommand, type CommandContext, type Controls } from '../../../src/commands/index.js';
 import { createDefaultProfileConfig, type ProfileConfig } from '../../../src/config/profile-schema.js';
 import { SessionStore } from '../../../src/session/store.js';
@@ -18,6 +19,7 @@ interface Harness {
   sessions: SessionStore;
   workspaces: WorkspaceStore;
   activeRuns: ActiveRuns;
+  autoResumer: AutoResumer;
   agent: ReturnType<typeof createFakeAgent>;
   controls: Controls;
   cleanup(): Promise<void>;
@@ -265,6 +267,30 @@ describe('Claude slash command visible behavior', () => {
     expect(activeRun.stopped).toBe(true);
   });
 
+  it('/stop also cancels a resume the agent scheduled, even while another turn runs', async () => {
+    const h = await createHarness();
+    const resumeAt = new Date(2026, 10, 26, 18, 1).getTime();
+    await h.autoResumer.schedule(scheduledResume(resumeAt));
+    const activeRun = h.agent.run({ runId: 'run-active', prompt: 'running' }) as FakeAgentRun;
+    h.activeRuns.register('chat-1', activeRun);
+
+    await expect(h.run('/stop')).resolves.toBe(true);
+
+    expect(activeRun.stopped).toBe(true);
+    expect(h.autoResumer.get('chat-1')).toBeUndefined();
+    expect(lastMarkdown(h.channel)).toContain('也取消了原定 11-26 18:01 的自动续跑');
+  });
+
+  it('/stop with nothing running cancels the pending resume alone', async () => {
+    const h = await createHarness();
+    await h.autoResumer.schedule(scheduledResume(new Date(2026, 10, 26, 18, 1).getTime()));
+
+    await expect(h.run('/stop')).resolves.toBe(true);
+
+    expect(h.autoResumer.get('chat-1')).toBeUndefined();
+    expect(lastMarkdown(h.channel)).toContain('已取消自动续跑（原定 11-26 18:01）');
+  });
+
   it('lets admins stop and configure comment scopes explicitly', async () => {
     const h = await createHarness();
     const commentScope = 'comment:abc123';
@@ -318,6 +344,7 @@ async function createHarness(): Promise<Harness> {
   const sessions = new SessionStore(`${tmp.profile}/sessions.json`);
   const workspaces = new WorkspaceStore(`${tmp.profile}/workspaces.json`);
   const activeRuns = new ActiveRuns();
+  const autoResumer = new AutoResumer({ fire: async () => {} });
   const agent = createFakeAgent();
   const profileConfig = appConfig(tmp.workspace);
   const controls = {
@@ -344,6 +371,7 @@ async function createHarness(): Promise<Harness> {
       agent,
       activeRuns,
       controls,
+      autoResumer,
     });
 
   const cleanup = async (): Promise<void> => {
@@ -352,7 +380,21 @@ async function createHarness(): Promise<Harness> {
   };
   cleanups.push(cleanup);
 
-  return { tmp, channel, sessions, workspaces, activeRuns, agent, controls, cleanup, run };
+  return { tmp, channel, sessions, workspaces, activeRuns, autoResumer, agent, controls, cleanup, run };
+}
+
+function scheduledResume(resumeAt: number): PendingResume {
+  return {
+    scope: 'chat-1',
+    chatId: 'chat-1',
+    chatType: 'p2p',
+    senderId: 'ou-user',
+    originMessageId: 'om-task',
+    resumeAt,
+    kind: 'scheduled',
+    attempt: 1,
+    createdAt: 0,
+  };
 }
 
 function appConfig(defaultWorkspace: string): ProfileConfig {

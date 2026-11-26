@@ -1,6 +1,7 @@
 import { deepMaskEmails } from './mask-email';
 import { runStrings, type Locale, type RunStrings } from './i18n';
 import { pauseNotice } from './pause-notice';
+import { resumeNotice } from './resume-marker';
 import { backgroundLeft, type Block, type FooterStatus, type RunState, type Terminal, type ToolEntry } from './run-state';
 import { toolBodyMd, toolHeaderText } from './tool-render';
 
@@ -96,9 +97,10 @@ export function renderCard(state: RunState, options: RunCardRenderOptions = {}):
     elements.push(markdown(pauseNotice(state.limit, options.locale)));
   } else if (state.terminal === 'error' && state.errorMsg) {
     elements.push(noteMd(t.agentFailed(state.errorMsg)));
-  } else if (state.terminal === 'done' && elements.length === 0) {
+  } else if (state.terminal === 'done' && elements.length === 0 && !state.resume) {
     elements.push(noteMd(t.noContent));
   }
+  if (state.resume) elements.push(noteMd(resumeNotice(state.resume, options.locale)));
   const background = backgroundLeft(state);
   if (background > 0) elements.push(noteMd(t.backgroundRunning(background)));
 

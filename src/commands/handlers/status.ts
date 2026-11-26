@@ -4,7 +4,7 @@ import { statusCard, taskStatusCard, type StatusInfo } from '../../card/template
 import { getSmartSession } from '../../config/schema';
 import type { ProfileConfig } from '../../config/profile-schema';
 import { describeActiveRun } from '../../bot/run-status';
-import { formatMoment, limitLabel } from '../../bot/auto-resume';
+import { describePendingResume } from '../../bot/auto-resume';
 import { accessToClaudePermissionMode } from '../../config/permissions';
 import { canRunAdminCommand } from '../../policy/access';
 import { decideRotation } from '../../session/smart-session';
@@ -77,7 +77,7 @@ export async function handleStatus(_args: string, ctx: CommandContext): Promise<
       ...(activeHandle ? { activeRun: describeActiveRun(activeHandle) } : {}),
       ...(pendingResume
         ? {
-            autoResume: `${limitLabel(pendingResume.limitType)}用完暂停，${formatMoment(pendingResume.resumeAt)} 自动继续（发 /stop 取消）`,
+            autoResume: describePendingResume(pendingResume),
           }
         : {}),
     });
@@ -112,7 +112,7 @@ export async function handleStatus(_args: string, ctx: CommandContext): Promise<
     ...(activeHandle ? { activeRunDetail: describeActiveRun(activeHandle) } : {}),
     ...(pendingResume
       ? {
-          autoResume: `${limitLabel(pendingResume.limitType)}用完暂停，${formatMoment(pendingResume.resumeAt)} 自动继续（发 /stop 取消）`,
+          autoResume: describePendingResume(pendingResume),
         }
       : {}),
     backgroundRun: ctx.activeRuns.isLingering(ctx.scope),

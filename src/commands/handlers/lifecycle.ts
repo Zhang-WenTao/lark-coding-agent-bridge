@@ -36,31 +36,37 @@ export async function handleStop(args: string, ctx: CommandContext): Promise<voi
   }
   const stopped = ctx.activeRuns.interruptDetailed(scope);
   const ok = stopped.active || stopped.background;
-  if (!targetScope && !ok) {
-    // Nothing running, but a quota-paused task may be waiting to resume.
-    const waiting = ctx.autoResumer?.get(scope);
-    if (waiting) {
-      const decision = canStopRun(
-        ctx.controls.profileConfig,
-        ctx.controls,
-        ctx.msg.senderId,
-        new Set([waiting.senderId]),
-      );
-      if (!decision.ok) {
-        await reply(ctx, '❌ 只有任务的发起人、bot 主人、管理员或终止白名单里的人可以取消自动续跑。');
-        return;
-      }
+  // A task waiting to resume on its own (quota pause, interruption, or one the
+  // agent paused on purpose) is stopped too, whether or not a turn was running.
+  const waiting = targetScope ? undefined : ctx.autoResumer?.get(scope);
+  let cancelled = false;
+  if (waiting) {
+    const decision = canStopRun(
+      ctx.controls.profileConfig,
+      ctx.controls,
+      ctx.msg.senderId,
+      new Set([waiting.senderId]),
+    );
+    if (decision.ok) {
       await ctx.autoResumer?.cancel(scope, 'stop-command');
-      await reply(ctx, `已取消自动续跑（原定 ${formatMoment(waiting.resumeAt)}）。需要时发「继续」即可接着做。`);
+      cancelled = true;
+    } else if (!ok) {
+      await reply(ctx, '❌ 只有任务的发起人、bot 主人、管理员或终止白名单里的人可以取消自动续跑。');
       return;
     }
+  }
+  if (waiting && cancelled && !ok) {
+    await reply(ctx, `已取消自动续跑（原定 ${formatMoment(waiting.resumeAt)}）。需要时发「继续」即可接着做。`);
+    return;
   }
   log.info('command', 'stop', {
     scope,
     targeted: Boolean(targetScope),
     interrupted: ok,
     background: stopped.background,
+    ...(cancelled ? { cancelledResume: true } : {}),
   });
+  const alsoCancelled = waiting && cancelled ? `也取消了原定 ${formatMoment(waiting.resumeAt)} 的自动续跑。` : '';
   if (targetScope) {
     await reply(
       ctx,
@@ -72,7 +78,9 @@ export async function handleStop(args: string, ctx: CommandContext): Promise<voi
   // No reply for the current IM scope when a run was in flight: its render
   // loop marks the card as interrupted. Background work has no card to mark.
   else if (stopped.background && !stopped.active) {
-    await reply(ctx, '已停止后台任务。');
+    await reply(ctx, `已停止后台任务。${alsoCancelled}`);
+  } else if (alsoCancelled) {
+    await reply(ctx, `已停止当前任务，${alsoCancelled}`);
   }
 }
 

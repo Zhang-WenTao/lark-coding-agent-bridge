@@ -1,6 +1,7 @@
 import { maskEmails } from './mask-email';
 import { runStrings, type Locale, type RunStrings } from './i18n';
 import { pauseNotice } from './pause-notice';
+import { resumeNotice } from './resume-marker';
 import { backgroundLeft, type Block, type RunState, type ToolEntry } from './run-state';
 import { toolHeaderText } from './tool-render';
 
@@ -34,6 +35,7 @@ export function renderText(state: RunState, locale?: Locale): string {
   } else if (state.terminal === 'running' && state.footer) {
     parts.push(footerLine(state.footer, t));
   }
+  if (state.resume) parts.push(resumeNotice(state.resume, locale));
   const background = backgroundLeft(state);
   if (background > 0) parts.push(t.backgroundRunning(background));
 

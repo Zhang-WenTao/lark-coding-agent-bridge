@@ -300,7 +300,7 @@ If a profile was created with the wrong agent kind, stop or unregister any match
 | `/invite member @name` | Add a person to the current group's member allowlist |
 | `/invite all group` | Allow all groups the bot has joined |
 | `/remove user @name`, `/remove admin @name`, `/remove group [chat id]`, `/remove member @name` | Remove access entries; `/remove group <chat id>` drops the named group by full id or trailing characters, also from a DM |
-| `/stop` | Stop the current run, including the card stop button |
+| `/stop` | Stop the current run, including the card stop button; also cancels a task in this chat that is waiting to resume on its own |
 | `/timeout [N\|off\|default]` | Set or clear the current session idle watchdog |
 | `/memory [add\|forget\|clear]` | Cross-session memory; `--global` writes profile-wide |
 | `/skills [show <name>]` | The skill index the agent reads on demand |
@@ -550,6 +550,27 @@ The reply card is posted when a run starts and then updated in place, and Feishu
 - Runs the user stopped with `/stop` get no notice.
 
 The threshold is the profile's `preferences.longRunNoticeMinutes` (minutes, `0` turns it off), config-file only.
+
+### Paused tasks resume on their own
+
+In three cases the bridge later picks a task up again by itself: at the set time a new card starts under the original message, in the same conversation (smart session compaction never starts a new one for that turn). A waiting task shows in `/status`, and `/stop` cancels it. The record is kept in the profile's `auto-resume.json`, so it still fires on time after a bridge restart.
+
+- **Quota used up**: when the Claude subscription quota refuses a request and the task pauses, it resumes about a minute after the reset. A later turn in the same conversation that finishes normally drops it.
+- **Interrupted**: when an owner's task has announced `📒 任务台账：<absolute path>` (its task ledger) and the process is killed or the bridge restarts / shuts down, it resumes from the ledger about 30 seconds later.
+- **Paused on purpose**: when the owner asks the agent to stop on a condition ("stop once the 5-hour quota is past 50%, continue after the reset"), the agent writes its progress and next step into the task ledger, then puts one of these on a line of its own in its final reply:
+  - `[[RESUME_AFTER: five_hour | absolute ledger path]]`: resume 1.5–2 minutes after the current 5-hour quota window resets. The reset time is the latest reading of the account the run used (`claude-accounts-state.json`), so this is Claude only;
+  - `[[RESUME_AT: 2026-11-26T18:00 | absolute ledger path]]`: resume at that time (host clock, or with an offset); a bare `18:00` means the next 18:00;
+  - `[[RESUME_CANCEL]]`: drop the resume already agreed (the owner said to hold off).
+
+  The ledger part is optional: without it the bridge uses the run's `📒 任务台账` line, and a resumed turn that pauses again keeps the previous ledger; with neither, the agent is simply told to continue where it paused, in the same conversation. The resumed turn is told `[自动继续] … 请先读任务台账：…` — read the ledger and continue from its next step.
+
+  The lines are stripped in every reply mode (the COT process message included); the reply ends with a line like `将在 11-26 18:01 自动继续` instead, or says why nothing was scheduled. Only a line of its own outside fenced code counts — talking about the markers in the text triggers nothing. Rules:
+
+  - Only the owner's runs schedule; a marker in a reply to anyone else's message is stripped and ignored. Every owner run carries a short instruction telling the agent when to use the markers, and the time currently agreed, if any.
+  - The time must be 5 minutes to 24 hours ahead: an earlier one is moved to 5 minutes, a past one or one more than 24 hours out is refused.
+  - At most 6 automatic resumes in a row for one task (counted together with quota resumes).
+  - One agreement per conversation; a new marker replaces the old one.
+  - An unrelated owner message in the same conversation leaves the agreement in place — the turn finishing does not drop it, and that turn's agent is told about it, so it writes `[[RESUME_CANCEL]]` when the owner says to hold off. `/stop` cancels it directly, along with any turn still running.
 
 ## lark-cli identity policy
 

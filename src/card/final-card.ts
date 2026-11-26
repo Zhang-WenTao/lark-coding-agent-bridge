@@ -2,6 +2,7 @@ import type { CardHeaderTemplate } from '../config/schema';
 import { runStrings, type Locale } from './i18n';
 import { deepMaskEmails } from './mask-email';
 import { pauseNotice } from './pause-notice';
+import { resumeNotice } from './resume-marker';
 import { backgroundLeft, type RunState } from './run-state';
 import { truncateTitle } from './title-marker';
 
@@ -95,7 +96,11 @@ export function finalCardStatus(state: RunState, locale?: Locale): string | unde
       return state.errorMsg ? t.agentFailed(truncate(oneLine(state.errorMsg), ERROR_MAX)) : t.summary.error;
     default: {
       const background = backgroundLeft(state);
-      return background > 0 ? t.backgroundRunning(background) : undefined;
+      const lines = [
+        background > 0 ? t.backgroundRunning(background) : undefined,
+        state.resume ? resumeNotice(state.resume, locale) : undefined,
+      ].filter((line): line is string => line !== undefined);
+      return lines.length > 0 ? lines.join(' ') : undefined;
     }
   }
 }
